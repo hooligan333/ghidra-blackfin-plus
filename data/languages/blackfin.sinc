@@ -69,6 +69,17 @@ define register offset=0x200 size=4 [
     contextreg
 ];
 
+# R0-R7, P0-P5, SP, FP and I0-I3 as they were at the start of a parallel bundle
+# (32-bit op || slot1 || slot2). All parts of a bundle read registers before any part writes them;
+# the slots read these copies (e.g. "P4 = [FP + 0xc] || R2 = [P4 + 0x14]" uses the old P4).
+define register offset=0x300 size=4 [ R0_pre R1_pre R2_pre R3_pre R4_pre R5_pre R6_pre R7_pre ];
+define register offset=0x300 size=2 [
+    R0_pre.L R0_pre.H R1_pre.L R1_pre.H R2_pre.L R2_pre.H R3_pre.L R3_pre.H
+    R4_pre.L R4_pre.H R5_pre.L R5_pre.H R6_pre.L R6_pre.H R7_pre.L R7_pre.H
+];
+define register offset=0x320 size=4 [ P0_pre P1_pre P2_pre P3_pre P4_pre P5_pre SP_pre FP_pre ];
+define register offset=0x340 size=4 [ I0_pre I1_pre I2_pre I3_pre ];
+
 define token inst(16)
     op16 = (0,15)
 
@@ -145,6 +156,15 @@ define token inst(16)
     Dreg_h0 = (0,2)
     Dreg_h6 = (6,8)
     Dreg_b3 = (3,5)
+    Sreg0 = (0,2)
+    Sreg6 = (6,8)
+    Sreg_l0 = (0,2)
+    Sreg_l6 = (6,8)
+    Sreg_h0 = (0,2)
+    Sreg_h6 = (6,8)
+    SPreg0 = (0,2)
+    SPreg3 = (3,5)
+    SIreg3 = (3,4)
 
 # pointer reg
     Preg0 = (0,2)
@@ -315,6 +335,7 @@ define context contextreg
     loop0active = (1,1) noflow
     loop1active = (2,2) noflow
     mmodval = (3,6) noflow
+    inslot = (7,7) noflow     # set on the two 16-bit slots of a parallel bundle
 ;
 
 attach values [LdSt_sz] [4 2 1 0];
@@ -330,6 +351,11 @@ attach variables [ xreg6_e ] [ R0 _ R2 _ R4 _ R6 _ ];
 attach variables [ Dreg_l0 Dreg_l3 Dreg_l6 xreg0_l xreg3_l xreg6_l xreg9_l ] [ R0.L R1.L R2.L R3.L R4.L R5.L R6.L R7.L];
 attach variables [ Dreg_h0 Dreg_h6 xreg0_h xreg3_h xreg6_h xreg9_h ] [ R0.H R1.H R2.H R3.H R4.H R5.H R6.H R7.H];
 attach variables [ Dreg_b3 ] [ R0.B R1.B R2.B R3.B R4.B R5.B R6.B R7.B];
+attach variables [ Sreg0 Sreg6 ] [ R0_pre R1_pre R2_pre R3_pre R4_pre R5_pre R6_pre R7_pre ];
+attach variables [ Sreg_l0 Sreg_l6 ] [ R0_pre.L R1_pre.L R2_pre.L R3_pre.L R4_pre.L R5_pre.L R6_pre.L R7_pre.L ];
+attach variables [ Sreg_h0 Sreg_h6 ] [ R0_pre.H R1_pre.H R2_pre.H R3_pre.H R4_pre.H R5_pre.H R6_pre.H R7_pre.H ];
+attach variables [ SPreg0 SPreg3 ] [ P0_pre P1_pre P2_pre P3_pre P4_pre P5_pre SP_pre FP_pre ];
+attach variables [ SIreg3 ] [ I0_pre I1_pre I2_pre I3_pre ];
 
 @ifdef BLACKFIN_PLUS
 attach variables [ zdreg0 ]   [ R0 R1 R2 R3 R4 R5 R6 R7];
@@ -565,43 +591,81 @@ define pcodeop abs_vec;
 define pcodeop neg_vec;
 
 
-# Mark parallel instructions at the 32bit opcode and use delayslot to include the next two instructions.
-# This is not perfect as the result may be wrong depending on the source and destination registers used.
-# But there does not seem to be a better solution for this yet.
+# Parallel bundles: "32-bit op || slot1 || slot2", where the slots are 16-bit loads/stores.
+# On hardware every part reads its registers before any part writes them. Modelled as:
+#   1. bpre copies R0-R7 to R0_pre-R7_pre (root constructor, before anything else),
+#   2. the 32-bit op runs; it reads the pre-bundle state because nothing has been written yet,
+#   3. bslots runs both slots via delayslot. p marks the slot addresses with the inslot context;
+#      with inslot=1 the slots read their store data (st_*, LdSt_sreg, LdStIFP_sreg) and their
+#      address registers (PTR, LdSt_ptr, LdI_ptr*, LdStII_ptr*, LdStIFP_ptr) from the *_pre copies,
+#      so neither the 32-bit op nor the other slot affects what a slot reads.
+# M registers are read live; no part of a bundle writes them.
+# The delay slot also keeps a hardware loop that ends on a bundle correct: all three parts run,
+# then the loop is evaluated.
 
-# Example: R1 = R0 -|- R2 || [FP + 36] = R1 || nop;
-# R1 is destination in the first instruction and source in the second instruction
-# With the current implementation the second instruction uses the result from the first, but on real hardware it would use the unmodified value.
+# Address of slot 2 (slots are 16 bit). Operand only in the pattern, so it is not displayed.
+slot2: s2 is epsilon [ s2 = inst_next + 2; ] { export *[ram]:4 s2; }
 
-# The delayslot is required if the hardware loop ends on a parallel instruction.
-# In that case all three instructions are executed and only then the hardware loop is evaluated.
-
-p: "||" is op4=0xc & t11=1 { delayslot(4); }
+p: "||" is op4=0xc & t11=1 & slot2 [ inslot = 1; globalset(inst_next, inslot); globalset(slot2, inslot); ] { }
 p:      is op4=0xc & t11=0 { }
+
+bpre: is op4=0xc & t11=1 {
+    R0_pre = R0; R1_pre = R1; R2_pre = R2; R3_pre = R3;
+    R4_pre = R4; R5_pre = R5; R6_pre = R6; R7_pre = R7;
+    P0_pre = P0; P1_pre = P1; P2_pre = P2; P3_pre = P3;
+    P4_pre = P4; P5_pre = P5; SP_pre = SP; FP_pre = FP;
+    I0_pre = I0; I1_pre = I1; I2_pre = I2; I3_pre = I3;
+}
+bpre: is epsilon { }
+
+bslots: is op4=0xc & t11=1 { delayslot(4); }
+bslots: is epsilon { }
+
+# Data register read by a store; in a bundle slot it is the pre-bundle value.
+st_d0:  Dreg0   is inslot=0 & Dreg0             { export Dreg0; }
+st_d0:  Dreg0   is inslot=1 & Dreg0 & Sreg0     { export Sreg0; }
+st_d6:  Dreg6   is inslot=0 & Dreg6             { export Dreg6; }
+st_d6:  Dreg6   is inslot=1 & Dreg6 & Sreg6     { export Sreg6; }
+st_dl0: Dreg_l0 is inslot=0 & Dreg_l0           { export Dreg_l0; }
+st_dl0: Dreg_l0 is inslot=1 & Dreg_l0 & Sreg_l0 { export Sreg_l0; }
+st_dh0: Dreg_h0 is inslot=0 & Dreg_h0           { export Dreg_h0; }
+st_dh0: Dreg_h0 is inslot=1 & Dreg_h0 & Sreg_h0 { export Sreg_h0; }
+st_dl6: Dreg_l6 is inslot=0 & Dreg_l6           { export Dreg_l6; }
+st_dl6: Dreg_l6 is inslot=1 & Dreg_l6 & Sreg_l6 { export Sreg_l6; }
+st_dh6: Dreg_h6 is inslot=0 & Dreg_h6           { export Dreg_h6; }
+st_dh6: Dreg_h6 is inslot=1 & Dreg_h6 & Sreg_h6 { export Sreg_h6; }
+st_p0:  Preg0   is inslot=0 & Preg0             { export Preg0; }
+st_p0:  Preg0   is inslot=1 & Preg0 & SPreg0    { export SPreg0; }
 
 
 # Hardware loops
 
-:^instruction is phase=0 & loop0active=0 & loop1active=0 & instruction [ phase=1; ] { build instruction; }
-:^instruction is phase=0 & loop0active=1 & instruction [ phase=1; ]
+:^instruction is phase=0 & loop0active=0 & loop1active=0 & bpre & bslots & instruction [ phase=1; ] { build bpre; build instruction; build bslots; }
+:^instruction is phase=0 & loop0active=1 & bpre & bslots & instruction [ phase=1; ]
 {
+    build bpre;
     build instruction;
+    build bslots;
     if (LC0 == 0) goto inst_next;
     LC0 = LC0 - 1;
     if (LC0 == 0) goto inst_next;
     goto [LT0];
 }
-:^instruction is phase=0 & loop1active=1 & instruction [ phase=1; ]
+:^instruction is phase=0 & loop1active=1 & bpre & bslots & instruction [ phase=1; ]
 {
+    build bpre;
     build instruction;
+    build bslots;
     if (LC1 == 0) goto inst_next;
     LC1 = LC1 - 1;
     if (LC1 == 0) goto inst_next;
     goto [LT1];
 }
-:^instruction is phase=0 & loop0active=1 & loop1active=1 & instruction [ phase=1; ]
+:^instruction is phase=0 & loop0active=1 & loop1active=1 & bpre & bslots & instruction [ phase=1; ]
 {
+    build bpre;
     build instruction;
+    build bslots;
     if (LC1 == 0) goto <check_loop0>;
     LC1 = LC1 - 1;
     if (LC1 == 0) goto <check_loop0>;
@@ -995,8 +1059,10 @@ LdImmReg: Preg0 is g11=1 & Preg0 { export Preg0; }
 # | 1 | 0 | 0 | 0 |.W.|.aop...|.reg.......|.idx.......|.ptr.......|
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+ 
 
-PTR: [Preg0 ++ Preg3] is Preg0 & Preg3 { local tmp:4 = Preg0; Preg0 = Preg0 + Preg3; export tmp; }
-PTR: [Preg0]          is Preg0 & Preg0=Preg3 { export Preg0; }
+PTR: [Preg0 ++ Preg3] is inslot=0 & Preg0 & Preg3 { local tmp:4 = Preg0; Preg0 = Preg0 + Preg3; export tmp; }
+PTR: [Preg0]          is inslot=0 & Preg0 & Preg0=Preg3 { export Preg0; }
+PTR: [Preg0 ++ Preg3] is inslot=1 & Preg0 & Preg3 & SPreg0 & SPreg3 { local tmp:4 = SPreg0; Preg0 = SPreg0 + SPreg3; export tmp; }
+PTR: [Preg0]          is inslot=1 & Preg0 & Preg0=Preg3 & SPreg0 { export SPreg0; }
 
 :LOAD Dreg6 = PTR           is op4=0x8 & w11=0 & aop0910=0 & Dreg6   & PTR { Dreg6 = *:4 PTR; }
 :LOAD Dreg_l6 = "W" PTR     is op4=0x8 & w11=0 & aop0910=1 & Dreg_l6 & PTR { Dreg_l6 = *:2 PTR; }
@@ -1004,9 +1070,9 @@ PTR: [Preg0]          is Preg0 & Preg0=Preg3 { export Preg0; }
 :LOAD Dreg6 = "W" PTR "(Z)" is op4=0x8 & w11=0 & aop0910=3 & Dreg6   & PTR { Dreg6 = zext(*:2 PTR); }
 :LOAD Dreg6 = "W" PTR "(X)" is op4=0x8 & w11=1 & aop0910=3 & Dreg6   & PTR { Dreg6 = sext(*:2 PTR); }
 
-:STORE PTR = Dreg6          is op4=0x8 & w11=1 & aop0910=0 & Dreg6   & PTR { *:4 PTR = Dreg6; }
-:STORE "W" PTR = Dreg_l6    is op4=0x8 & w11=1 & aop0910=1 & Dreg_l6 & PTR { *:2 PTR = Dreg_l6; }
-:STORE "W" PTR = Dreg_h6    is op4=0x8 & w11=1 & aop0910=2 & Dreg_h6 & PTR { *:2 PTR = Dreg_h6; }
+:STORE PTR = st_d6          is op4=0x8 & w11=1 & aop0910=0 & st_d6   & PTR { *:4 PTR = st_d6; }
+:STORE "W" PTR = st_dl6     is op4=0x8 & w11=1 & aop0910=1 & st_dl6  & PTR { *:2 PTR = st_dl6; }
+:STORE "W" PTR = st_dh6     is op4=0x8 & w11=1 & aop0910=2 & st_dh6  & PTR { *:2 PTR = st_dh6; }
 
 
 #####
@@ -1019,9 +1085,17 @@ PTR: [Preg0]          is Preg0 & Preg0=Preg3 { export Preg0; }
 LdSt_reg: Dreg0 is Dreg0                                 { export Dreg0; }
 LdSt_reg: Preg0 is LdSt_sz=0 & LdSt_z=1 & Preg0          { export Preg0; }
 
-LdSt_ptr: [Preg3]   is Preg3 & LdSt_aop=2                { export Preg3; }
-LdSt_ptr: [Preg3++] is Preg3 & LdSt_aop=0 & LdSt_sz      { tmp:4 = Preg3; Preg3 = Preg3 + LdSt_sz; export tmp; }
-LdSt_ptr: [Preg3--] is Preg3 & LdSt_aop=1 & LdSt_sz      { tmp:4 = Preg3; Preg3 = Preg3 - LdSt_sz; export tmp; }
+LdSt_sreg: Dreg0 is inslot=0 & Dreg0                               { export Dreg0; }
+LdSt_sreg: Dreg0 is inslot=1 & Dreg0 & Sreg0                       { export Sreg0; }
+LdSt_sreg: Preg0 is inslot=0 & LdSt_sz=0 & LdSt_z=1 & Preg0        { export Preg0; }
+LdSt_sreg: Preg0 is inslot=1 & LdSt_sz=0 & LdSt_z=1 & Preg0 & SPreg0 { export SPreg0; }
+
+LdSt_ptr: [Preg3]   is inslot=0 & Preg3 & LdSt_aop=2                { export Preg3; }
+LdSt_ptr: [Preg3++] is inslot=0 & Preg3 & LdSt_aop=0 & LdSt_sz      { tmp:4 = Preg3; Preg3 = Preg3 + LdSt_sz; export tmp; }
+LdSt_ptr: [Preg3--] is inslot=0 & Preg3 & LdSt_aop=1 & LdSt_sz      { tmp:4 = Preg3; Preg3 = Preg3 - LdSt_sz; export tmp; }
+LdSt_ptr: [Preg3]   is inslot=1 & Preg3 & SPreg3 & LdSt_aop=2           { export SPreg3; }
+LdSt_ptr: [Preg3++] is inslot=1 & Preg3 & SPreg3 & LdSt_aop=0 & LdSt_sz { tmp:4 = SPreg3; Preg3 = SPreg3 + LdSt_sz; export tmp; }
+LdSt_ptr: [Preg3--] is inslot=1 & Preg3 & SPreg3 & LdSt_aop=1 & LdSt_sz { tmp:4 = SPreg3; Preg3 = SPreg3 - LdSt_sz; export tmp; }
 
 LdSt_ldptr: LdSt_ptr            is LdSt_sz=0 & LdSt_ptr              { export *:4 LdSt_ptr; }
 LdSt_ldptr: "W" LdSt_ptr "(Z)"  is LdSt_sz=1 & LdSt_z=0 & LdSt_ptr   { tmp:4 = zext(*:2 LdSt_ptr); export tmp; }
@@ -1030,9 +1104,9 @@ LdSt_ldptr: "B" LdSt_ptr "(Z)"  is LdSt_sz=2 & LdSt_z=0 & LdSt_ptr   { tmp:4 = z
 LdSt_ldptr: "B" LdSt_ptr "(X)"  is LdSt_sz=2 & LdSt_z=1 & LdSt_ptr   { tmp:4 = sext(*:1 LdSt_ptr); export tmp; }
 
 :LOAD LdSt_reg = LdSt_ldptr     is op4=0x9 & LdSt_w=0 & LdSt_reg & LdSt_ldptr                      { LdSt_reg = LdSt_ldptr; }
-:STORE LdSt_ptr = LdSt_reg      is op4=0x9 & LdSt_w=1 & LdSt_reg & LdSt_ptr & LdSt_sz=0            { *:4 LdSt_ptr = LdSt_reg; }
-:STORE "W" LdSt_ptr = LdSt_reg  is op4=0x9 & LdSt_w=1 & LdSt_reg & LdSt_ptr & LdSt_sz=1 & LdSt_z=0 { *:2 LdSt_ptr = LdSt_reg:2; }
-:STORE "B" LdSt_ptr = LdSt_reg  is op4=0x9 & LdSt_w=1 & LdSt_reg & LdSt_ptr & LdSt_sz=2 & LdSt_z=0 { *:1 LdSt_ptr = LdSt_reg:1; }
+:STORE LdSt_ptr = LdSt_sreg     is op4=0x9 & LdSt_w=1 & LdSt_sreg & LdSt_ptr & LdSt_sz=0            { *:4 LdSt_ptr = LdSt_sreg; }
+:STORE "W" LdSt_ptr = LdSt_sreg is op4=0x9 & LdSt_w=1 & LdSt_sreg & LdSt_ptr & LdSt_sz=1 & LdSt_z=0 { *:2 LdSt_ptr = LdSt_sreg:2; }
+:STORE "B" LdSt_ptr = LdSt_sreg is op4=0x9 & LdSt_w=1 & LdSt_sreg & LdSt_ptr & LdSt_sz=2 & LdSt_z=0 { *:1 LdSt_ptr = LdSt_sreg:1; }
 
 
 #####
@@ -1043,23 +1117,31 @@ LdSt_ldptr: "B" LdSt_ptr "(X)"  is LdSt_sz=2 & LdSt_z=1 & LdSt_ptr   { tmp:4 = s
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 # ToDo: circular buffer handling
 
-LdI_ptr4: [Ireg3++] is aop0708=0 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 + 4; export tmp; }
-LdI_ptr4: [Ireg3--] is aop0708=1 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 - 4; export tmp; }
-LdI_ptr4: [Ireg3]   is aop0708=2 & Ireg3 { export Ireg3; }
+LdI_ptr4: [Ireg3++] is inslot=0 & aop0708=0 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 + 4; export tmp; }
+LdI_ptr4: [Ireg3--] is inslot=0 & aop0708=1 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 - 4; export tmp; }
+LdI_ptr4: [Ireg3]   is inslot=0 & aop0708=2 & Ireg3 { export Ireg3; }
+LdI_ptr4: [Ireg3++] is inslot=1 & aop0708=0 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 + 4; export tmp; }
+LdI_ptr4: [Ireg3--] is inslot=1 & aop0708=1 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 - 4; export tmp; }
+LdI_ptr4: [Ireg3]   is inslot=1 & aop0708=2 & Ireg3 & SIreg3 { export SIreg3; }
 
-LdI_ptr2: [Ireg3++] is aop0708=0 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 + 2; export tmp; }
-LdI_ptr2: [Ireg3--] is aop0708=1 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 - 2; export tmp; }
-LdI_ptr2: [Ireg3]   is aop0708=2 & Ireg3 { export Ireg3; }
+LdI_ptr2: [Ireg3++] is inslot=0 & aop0708=0 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 + 2; export tmp; }
+LdI_ptr2: [Ireg3--] is inslot=0 & aop0708=1 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 - 2; export tmp; }
+LdI_ptr2: [Ireg3]   is inslot=0 & aop0708=2 & Ireg3 { export Ireg3; }
+LdI_ptr2: [Ireg3++] is inslot=1 & aop0708=0 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 + 2; export tmp; }
+LdI_ptr2: [Ireg3--] is inslot=1 & aop0708=1 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 - 2; export tmp; }
+LdI_ptr2: [Ireg3]   is inslot=1 & aop0708=2 & Ireg3 & SIreg3 { export SIreg3; }
 
 :LOAD Dreg0 = LdI_ptr4         is op6=0x27 & w09=0 & aop0708!=3 & LdI_ptr4 & Mreg5=0 & Dreg0   { Dreg0 = *:4 LdI_ptr4; }
 :LOAD Dreg_l0 = "W" LdI_ptr2   is op6=0x27 & w09=0 & aop0708!=3 & LdI_ptr2 & Mreg5=1 & Dreg_l0 { Dreg_l0 = *:2 LdI_ptr2; }
 :LOAD Dreg_h0 = "W" LdI_ptr2   is op6=0x27 & w09=0 & aop0708!=3 & LdI_ptr2 & Mreg5=2 & Dreg_h0 { Dreg_h0 = *:2 LdI_ptr2; }
-:LOAD Dreg0 = [Ireg3 ++ Mreg5] is op6=0x27 & w09=0 & aop0708=3  & Mreg5 & Ireg3 & Dreg0 { Dreg0 = *:4 Ireg3; Ireg3 = Ireg3 + Mreg5; }
+LdI_pm: [Ireg3 ++ Mreg5] is inslot=0 & Ireg3 & Mreg5          { local tmp:4 = Ireg3; Ireg3 = Ireg3 + Mreg5; export tmp; }
+LdI_pm: [Ireg3 ++ Mreg5] is inslot=1 & Ireg3 & Mreg5 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 + Mreg5; export tmp; }
+:LOAD Dreg0 = LdI_pm is op6=0x27 & w09=0 & aop0708=3  & LdI_pm & Dreg0 { Dreg0 = *:4 LdI_pm; }
 
-:STORE LdI_ptr4 = Dreg0         is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr4 & Mreg5=0 & Dreg0   { *:4 LdI_ptr4 = Dreg0; }
-:STORE "W" LdI_ptr2 = Dreg_l0   is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr2 & Mreg5=1 & Dreg_l0 { *:2 LdI_ptr2 = Dreg_l0; }
-:STORE "W" LdI_ptr2 = Dreg_h0   is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr2 & Mreg5=2 & Dreg_h0 { *:2 LdI_ptr2 = Dreg_h0; }
-:STORE [Ireg3 ++ Mreg5] = Dreg0 is op6=0x27 & w09=1 & aop0708=3  & Mreg5 & Ireg3 & Dreg0 { *:4 Ireg3 = Dreg0; Ireg3 = Ireg3 + Mreg5; }
+:STORE LdI_ptr4 = st_d0         is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr4 & Mreg5=0 & st_d0   { *:4 LdI_ptr4 = st_d0; }
+:STORE "W" LdI_ptr2 = st_dl0    is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr2 & Mreg5=1 & st_dl0  { *:2 LdI_ptr2 = st_dl0; }
+:STORE "W" LdI_ptr2 = st_dh0    is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr2 & Mreg5=2 & st_dh0  { *:2 LdI_ptr2 = st_dh0; }
+:STORE LdI_pm = st_d0 is op6=0x27 & w09=1 & aop0708=3  & LdI_pm & st_d0 { *:4 LdI_pm = st_d0; }
 
 
 #####
@@ -1096,16 +1178,18 @@ LdI_ptr2: [Ireg3]   is aop0708=2 & Ireg3 { export Ireg3; }
 # | 1 | 0 | 1 |.W.|.op....|.offset........|.ptr.......|.reg.......|
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+ 
 
-LdStII_ptr4: [Preg3 + offset] is Preg3 & LdStII_offset [ offset = LdStII_offset*4; ] { tmp:4 = Preg3 + offset; export tmp; }
-LdStII_ptr2: [Preg3 + offset] is Preg3 & LdStII_offset [ offset = LdStII_offset*2; ] { tmp:4 = Preg3 + offset; export tmp; }
+LdStII_ptr4: [Preg3 + offset] is inslot=0 & Preg3 & LdStII_offset [ offset = LdStII_offset*4; ] { tmp:4 = Preg3 + offset; export tmp; }
+LdStII_ptr2: [Preg3 + offset] is inslot=0 & Preg3 & LdStII_offset [ offset = LdStII_offset*2; ] { tmp:4 = Preg3 + offset; export tmp; }
+LdStII_ptr4: [Preg3 + offset] is inslot=1 & Preg3 & SPreg3 & LdStII_offset [ offset = LdStII_offset*4; ] { tmp:4 = SPreg3 + offset; export tmp; }
+LdStII_ptr2: [Preg3 + offset] is inslot=1 & Preg3 & SPreg3 & LdStII_offset [ offset = LdStII_offset*2; ] { tmp:4 = SPreg3 + offset; export tmp; }
 
 :LOAD Dreg0 = LdStII_ptr4           is op4=0xa & w12=0 & op1011=0 & Dreg0 & LdStII_ptr4 { Dreg0 = *:4 LdStII_ptr4; }
 :LOAD Dreg0 = "W" LdStII_ptr2 "(Z)" is op4=0xa & w12=0 & op1011=1 & Dreg0 & LdStII_ptr2 { Dreg0 = zext(*:2 LdStII_ptr2); }
 :LOAD Dreg0 = "W" LdStII_ptr2 "(X)" is op4=0xa & w12=0 & op1011=2 & Dreg0 & LdStII_ptr2 { Dreg0 = sext(*:2 LdStII_ptr2); }
 :LOAD Preg0 = LdStII_ptr4           is op4=0xa & w12=0 & op1011=3 & Preg0 & LdStII_ptr4 { Preg0 = *:4 LdStII_ptr4; }
-:STORE LdStII_ptr4 = Dreg0          is op4=0xb & w12=1 & op1011=0 & Dreg0 & LdStII_ptr4 { *:4 LdStII_ptr4 = Dreg0; }
-:STORE "W" LdStII_ptr2 = Dreg0      is op4=0xb & w12=1 & op1011=1 & Dreg0 & LdStII_ptr2 { *:2 LdStII_ptr2 = Dreg0; }
-:STORE LdStII_ptr4 = Preg0          is op4=0xb & w12=1 & op1011=3 & Preg0 & LdStII_ptr4 { *:4 LdStII_ptr4 = Preg0; }
+:STORE LdStII_ptr4 = st_d0          is op4=0xb & w12=1 & op1011=0 & st_d0 & LdStII_ptr4 { *:4 LdStII_ptr4 = st_d0; }
+:STORE "W" LdStII_ptr2 = st_d0      is op4=0xb & w12=1 & op1011=1 & st_d0 & LdStII_ptr2 { *:2 LdStII_ptr2 = st_d0; }
+:STORE LdStII_ptr4 = st_p0          is op4=0xb & w12=1 & op1011=3 & st_p0 & LdStII_ptr4 { *:4 LdStII_ptr4 = st_p0; }
 
 
 #####
@@ -1117,11 +1201,16 @@ LdStII_ptr2: [Preg3 + offset] is Preg3 & LdStII_offset [ offset = LdStII_offset*
 
 LdStIFP_reg: Dreg0 is LdStIFP_g=0 & Dreg0 { export Dreg0; }
 LdStIFP_reg: Preg0 is LdStIFP_g=1 & Preg0 { export Preg0; }
+LdStIFP_sreg: Dreg0 is inslot=0 & LdStIFP_g=0 & Dreg0           { export Dreg0; }
+LdStIFP_sreg: Dreg0 is inslot=1 & LdStIFP_g=0 & Dreg0 & Sreg0   { export Sreg0; }
+LdStIFP_sreg: Preg0 is inslot=0 & LdStIFP_g=1 & Preg0           { export Preg0; }
+LdStIFP_sreg: Preg0 is inslot=1 & LdStIFP_g=1 & Preg0 & SPreg0  { export SPreg0; }
 
-LdStIFP_ptr: [FP + offset] is FP & LdStIFP_off [offset = -((~LdStIFP_off & 0x1f)*4+4);]  { local tmp:4 = FP + offset; export tmp; }
+LdStIFP_ptr: [FP + offset] is inslot=0 & FP & LdStIFP_off [offset = -((~LdStIFP_off & 0x1f)*4+4);]  { local tmp:4 = FP + offset; export tmp; }
+LdStIFP_ptr: [FP + offset] is inslot=1 & FP & LdStIFP_off [offset = -((~LdStIFP_off & 0x1f)*4+4);]  { local tmp:4 = FP_pre + offset; export tmp; }
 
 :LOAD  LdStIFP_reg = LdStIFP_ptr is op6=0x2e & LdStIFP_w=0 & LdStIFP_reg & LdStIFP_ptr { LdStIFP_reg = *:4 LdStIFP_ptr; }
-:STORE LdStIFP_ptr = LdStIFP_reg is op6=0x2e & LdStIFP_w=1 & LdStIFP_reg & LdStIFP_ptr { *:4 LdStIFP_ptr = LdStIFP_reg; }
+:STORE LdStIFP_ptr = LdStIFP_sreg is op6=0x2e & LdStIFP_w=1 & LdStIFP_sreg & LdStIFP_ptr { *:4 LdStIFP_ptr = LdStIFP_sreg; }
 
 
 
