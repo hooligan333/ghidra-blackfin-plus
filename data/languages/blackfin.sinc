@@ -1188,7 +1188,7 @@ LdStII_ptr2: [Preg3 + offset] is inslot=1 & Preg3 & SPreg3 & LdStII_offset [ off
 :LOAD Dreg0 = "W" LdStII_ptr2 "(X)" is op4=0xa & w12=0 & op1011=2 & Dreg0 & LdStII_ptr2 { Dreg0 = sext(*:2 LdStII_ptr2); }
 :LOAD Preg0 = LdStII_ptr4           is op4=0xa & w12=0 & op1011=3 & Preg0 & LdStII_ptr4 { Preg0 = *:4 LdStII_ptr4; }
 :STORE LdStII_ptr4 = st_d0          is op4=0xb & w12=1 & op1011=0 & st_d0 & LdStII_ptr4 { *:4 LdStII_ptr4 = st_d0; }
-:STORE "W" LdStII_ptr2 = st_d0      is op4=0xb & w12=1 & op1011=1 & st_d0 & LdStII_ptr2 { *:2 LdStII_ptr2 = st_d0; }
+:STORE "W" LdStII_ptr2 = st_d0      is op4=0xb & w12=1 & op1011=1 & st_d0 & LdStII_ptr2 { *:2 LdStII_ptr2 = st_d0:2; }
 :STORE LdStII_ptr4 = st_p0          is op4=0xb & w12=1 & op1011=3 & st_p0 & LdStII_ptr4 { *:4 LdStII_ptr4 = st_p0; }
 
 
