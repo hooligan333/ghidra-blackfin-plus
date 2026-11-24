@@ -1945,15 +1945,15 @@ SHRS: xreg0_l is xh12=0 & xreg0_l { export xreg0_l; }
 SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 
 :ASH^p SHRD = "ashift" SHRS "by" xreg3_l       is p & op0410=0x60 & sopc0003=0 ; xsop1415=0 & xreg6=0 & xreg3_l & SHRD & SHRS { local r:8; ashiftv(r, SHRS, sext(xreg3_l)); SHRD = r:2; build p; }
-:ASH^p SHRD = "ashift" SHRS "by" xreg3_l "(s)" is p & op0410=0x60 & sopc0003=0 ; xsop1415=1 & xreg6=0 & xreg3_l & SHRD & SHRS { local r:8; ashiftv(r, SHRS, sext(xreg3_l)); SHRD = r:2; build p; }
+:ASH^p SHRD = "ashift" SHRS "by" xreg3_l "(s)" is p & op0410=0x60 & sopc0003=0 ; xsop1415=1 & xreg6=0 & xreg3_l & SHRD & SHRS { local r:8; ashiftv(r, SHRS, sext(xreg3_l)); sat_s16(r,r); SHRD = r:2; build p; }
 :LSH^p SHRD = "lshift" SHRS "by" xreg3_l       is p & op0410=0x60 & sopc0003=0 ; xsop1415=2 & xreg6=0 & xreg3_l & SHRD & SHRS { local r:8; lshiftv(r, SHRS, sext(xreg3_l)); SHRD = r:2; build p; }
 
 :ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l "(v)"   is p & op0410=0x60 & sopc0003=1 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local rl:8; ashiftv(rl, xreg0[0,16], sext(xreg3_l)); local rh:8; ashiftv(rh, xreg0[16,16], sext(xreg3_l)); xreg9 = (zext(rh:2) << 16) | zext(rl:2); build p; }
-:ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l "(v,s)" is p & op0410=0x60 & sopc0003=1 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local rl:8; ashiftv(rl, xreg0[0,16], sext(xreg3_l)); local rh:8; ashiftv(rh, xreg0[16,16], sext(xreg3_l)); xreg9 = (zext(rh:2) << 16) | zext(rl:2); build p; }
+:ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l "(v,s)" is p & op0410=0x60 & sopc0003=1 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local rl:8; ashiftv(rl, xreg0[0,16], sext(xreg3_l)); sat_s16(rl,rl); local rh:8; ashiftv(rh, xreg0[16,16], sext(xreg3_l)); sat_s16(rh,rh); xreg9 = (zext(rh:2) << 16) | zext(rl:2); build p; }
 :LSH^p xreg9 = "lshift" xreg0 "by" xreg3_l "(v)"   is p & op0410=0x60 & sopc0003=1 ; xsop1415=2 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local rl:8; lshiftv(rl, xreg0[0,16], sext(xreg3_l)); local rh:8; lshiftv(rh, xreg0[16,16], sext(xreg3_l)); xreg9 = (zext(rh:2) << 16) | zext(rl:2); build p; }
 
 :ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l       is p & op0410=0x60 & sopc0003=2 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; ashiftv(r, xreg0, sext(xreg3_l)); xreg9 = r:4; build p; }
-:ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l "(s)" is p & op0410=0x60 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; ashiftv(r, xreg0, sext(xreg3_l)); xreg9 = r:4; build p; }
+:ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l "(s)" is p & op0410=0x60 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; ashiftv(r, xreg0, sext(xreg3_l)); sat_s32(r,r); xreg9 = r:4; build p; }
 :LSH^p xreg9 = "lshift" xreg0 "by" xreg3_l       is p & op0410=0x60 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; lshiftv(r, xreg0, sext(xreg3_l)); xreg9 = r:4; build p; }
 :ROT^p xreg9 = "rot" xreg0 "by" xreg3_l          is p & op0410=0x60 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local c:4 = sext(xreg3_l); local t:4 = rot_bf(xreg0, c); xreg9 = t; build p; }
 
@@ -2038,13 +2038,13 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 
 :ASH^p SHRD = SHRS >>> shift       is p & op0410=0x68 & sopc0003=0 ; xsop1415=0 &            dimm603 & SHRD & SHRS [shift = -dimm603;] { SHRD = SHRS s>> shift; build p; }
-:ASH^p SHRD = SHRS << shift "(s)"  is p & op0410=0x68 & sopc0003=0 ; xsop1415=1 & sign08=0 & dimm603 & SHRD & SHRS [shift = dimm603+0;] { SHRD = SHRS << shift; build p; }
+:ASH^p SHRD = SHRS << shift "(s)"  is p & op0410=0x68 & sopc0003=0 ; xsop1415=1 & sign08=0 & dimm603 & SHRD & SHRS [shift = dimm603+0;] { local r:8 = sext(SHRS) << shift; sat_s16(r,r); SHRD = r:2; build p; }
 :ASH^p SHRD = SHRS >>> shift "(s)" is p & op0410=0x68 & sopc0003=0 ; xsop1415=1 & sign08=1 & dimm603 & SHRD & SHRS [shift = -dimm603;] { SHRD = SHRS s>> shift; build p; }
 :LSH^p SHRD = SHRS << shift        is p & op0410=0x68 & sopc0003=0 ; xsop1415=2 & sign08=0 & dimm603 & SHRD & SHRS [shift = dimm603+0;] { SHRD = SHRS << shift; build p; }
 :LSH^p SHRD = SHRS >> shift        is p & op0410=0x68 & sopc0003=0 ; xsop1415=2 & sign08=1 & dimm603 & SHRD & SHRS [shift = -dimm603;] { SHRD = SHRS >> shift; build p; }
 
 :ASH^p xreg9 = xreg0 >>> shift "(v)"   is p & op0410=0x68 & sopc0003=1 ; xsop1415=0 & xhls1213=0 &            dimm603 & xreg9 & xreg0 [shift = -dimm603;] { xreg9 = (zext(xreg0[16,16] s>> shift) << 16) | zext(xreg0[0,16] s>> shift); build p; }
-:ASH^p xreg9 = xreg0 << shift "(v,s)"  is p & op0410=0x68 & sopc0003=1 ; xsop1415=1 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { xreg9 = (zext(xreg0[16,16] << shift) << 16) | zext(xreg0[0,16] << shift); build p; }
+:ASH^p xreg9 = xreg0 << shift "(v,s)"  is p & op0410=0x68 & sopc0003=1 ; xsop1415=1 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { local rh:8 = sext(xreg0[16,16]) << shift; sat_s16(rh,rh); local rl:8 = sext(xreg0[0,16]) << shift; sat_s16(rl,rl); xreg9 = (zext(rh:2) << 16) | zext(rl:2); build p; }
 :ASH^p xreg9 = xreg0 >>> shift "(v,s)" is p & op0410=0x68 & sopc0003=1 ; xsop1415=1 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;] { xreg9 = (zext(xreg0[16,16] s>> shift) << 16) | zext(xreg0[0,16] s>> shift); build p; }
 :LSH^p xreg9 = xreg0 << shift "(v)"
     is p & op0410=0x68 & sopc0003=1 ; xsop1415=2 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg9_l & xreg9_h & xreg0 & xreg0_l & xreg0_h
@@ -2064,7 +2064,7 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 }
 
 :ASH^p xreg9 = xreg0 >>> shift       is p & op0410=0x68 & sopc0003=2 ; xsop1415=0 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;] { xreg9 = xreg0 s>> shift; build p;}
-:ASH^p xreg9 = xreg0 << shift "(s)"  is p & op0410=0x68 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { xreg9 = xreg0 << shift; build p;}
+:ASH^p xreg9 = xreg0 << shift "(s)"  is p & op0410=0x68 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { local r:8 = sext(xreg0) << shift; sat_s32(r,r); xreg9 = r:4; build p;}
 :ASH^p xreg9 = xreg0 >>> shift "(s)" is p & op0410=0x68 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;] { xreg9 = xreg0 s>> shift; build p;}
 :LSH^p xreg9 = xreg0 << shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { xreg9 = xreg0 << shift; build p;}
 :LSH^p xreg9 = xreg0 >> shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;]  { xreg9 = xreg0 >> shift; build p;}
