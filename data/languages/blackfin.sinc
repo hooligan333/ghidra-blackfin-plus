@@ -80,6 +80,7 @@ define register offset=0x300 size=2 [
 define register offset=0x320 size=4 [ P0_pre P1_pre P2_pre P3_pre P4_pre P5_pre SP_pre FP_pre ];
 define register offset=0x340 size=4 [ I0_pre I1_pre I2_pre I3_pre ];
 
+
 define token inst(16)
     op16 = (0,15)
 
@@ -242,6 +243,10 @@ define token inst(16)
     
     Ireg0 = (0,1)
     Ireg3 = (3,4)
+    Ibreg0 = (0,1)
+    Ibreg3 = (3,4)
+    Ilreg0 = (0,1)
+    Ilreg3 = (3,4)
 
     sopc0003 = (0,3)
     aopc0004 = (0,4)
@@ -272,6 +277,7 @@ define token inst2(16)
     eoffs = (0,9)
     li15 = (15,15)
     lpreg = (12,14)
+    lop = (10,11)       # LOP: 0 lsetup, 1 lsetupz, 2 lsetuplez (register count forms)
     limm6 = (10,15)     # BF+ rop=2: low 6 bits of the immediate loop count
 
 # dsp fields
@@ -336,6 +342,8 @@ define context contextreg
     loop1active = (2,2) noflow
     mmodval = (3,6) noflow
     inslot = (7,7) noflow     # set on the two 16-bit slots of a parallel bundle
+    loop0z = (8,8) noflow     # loop-end instruction of an LSETUPZ/LSETUPLEZ loop on LC0
+    loop1z = (9,9) noflow     # same for LC1
 ;
 
 attach values [LdSt_sz] [4 2 1 0];
@@ -343,6 +351,8 @@ attach values [LdSt_sz] [4 2 1 0];
 attach variables [ Dreg0 Dreg0_2 Dreg3 Dreg6 xreg0 xreg0_2 xreg3 xreg3_2 xreg6 xreg9 ] [ R0 R1 R2 R3 R4 R5 R6 R7];
 attach variables [ Preg0 Preg0_2 Preg3 Preg6 lpreg ] [ P0 P1 P2 P3 P4 P5 SP FP];
 attach variables [ Ireg0 Ireg3 ] [ I0 I1 I2 I3 ];
+attach variables [ Ibreg0 Ibreg3 ] [ B0 B1 B2 B3 ];
+attach variables [ Ilreg0 Ilreg3 ] [ L0 L1 L2 L3 ];
 attach variables [ Mreg2 Mreg5 ] [ M0 M1 M2 M3 ];
 
 attach variables [ xreg6_o ] [ R1 _ R3 _ R5 _ R7 _ ];
@@ -440,7 +450,7 @@ macro accunext(res, acc) {
 
 # Store a value into a 40-bit accumulator, clearing bits 40..63 (sim SET_AREG).
 macro accset(acc, val) {
-    acc = val & 0xffffffffff:8;
+    acc = (val << 24) s>> 24;     # 40-bit value kept sign-extended, so Ax.X reads back sign-extended
 }
 
 # AZ/AN from a 32-bit result (sim setflags_nz).
@@ -512,6 +522,18 @@ macro accto32(dst, accreg) {
     local t:8; accext(t, accreg);
     local s:8; sat_s32(s, t);
     dst = s:4;
+}
+
+# Circular-buffer index update (PRM "Addressing Circular Buffers"): dst = cur + delta, wrapped
+# into [B, B+L) when L != 0. delta >= 0: subtract L if the result is at or past B+L;
+# delta < 0: add L if the result is below B. L = 0 disables wrapping.
+macro circ_mod(dst, cur, breg, lreg, delta) {
+    local n:4 = cur + delta;
+    local en:1 = lreg != 0;
+    local off:4 = n - breg;
+    local whi:1 = en && (delta s>= 0) && (off >= lreg);
+    local wlo:1 = en && (delta s< 0) && (off s< 0);
+    dst = n - (lreg * zext(whi)) + (lreg * zext(wlo));
 }
 
 # Branchless signed abs of an 8-byte value.
@@ -619,6 +641,14 @@ bpre: is op4=0xc & t11=1 {
 bpre: is epsilon { }
 
 bslots: is op4=0xc & t11=1 { delayslot(4); }
+
+# Loop-end instruction of an LSETUPZ/LSETUPLEZ loop. A skipped loop arrives here with LC = 0
+# (on the normal path LC is >= 1 whenever the last instruction is reached), so LC = 0 means:
+# do nothing here and continue after this instruction (no loop-back check).
+lsk0: is loop0z=0 { }
+lsk0: is loop0z=1 { if (LC0 == 0) goto inst_next; }
+lsk1: is loop1z=0 { }
+lsk1: is loop1z=1 { if (LC1 == 0) goto inst_next; }
 bslots: is epsilon { }
 
 # Data register read by a store; in a bundle slot it is the pre-bundle value.
@@ -641,8 +671,9 @@ st_p0:  Preg0   is inslot=1 & Preg0 & SPreg0    { export SPreg0; }
 # Hardware loops
 
 :^instruction is phase=0 & loop0active=0 & loop1active=0 & bpre & bslots & instruction [ phase=1; ] { build bpre; build instruction; build bslots; }
-:^instruction is phase=0 & loop0active=1 & bpre & bslots & instruction [ phase=1; ]
+:^instruction is phase=0 & loop0active=1 & lsk0 & bpre & bslots & instruction [ phase=1; ]
 {
+    build lsk0;
     build bpre;
     build instruction;
     build bslots;
@@ -651,8 +682,9 @@ st_p0:  Preg0   is inslot=1 & Preg0 & SPreg0    { export SPreg0; }
     if (LC0 == 0) goto inst_next;
     goto [LT0];
 }
-:^instruction is phase=0 & loop1active=1 & bpre & bslots & instruction [ phase=1; ]
+:^instruction is phase=0 & loop1active=1 & lsk1 & bpre & bslots & instruction [ phase=1; ]
 {
+    build lsk1;
     build bpre;
     build instruction;
     build bslots;
@@ -661,8 +693,10 @@ st_p0:  Preg0   is inslot=1 & Preg0 & SPreg0    { export SPreg0; }
     if (LC1 == 0) goto inst_next;
     goto [LT1];
 }
-:^instruction is phase=0 & loop0active=1 & loop1active=1 & bpre & bslots & instruction [ phase=1; ]
+:^instruction is phase=0 & loop0active=1 & loop1active=1 & lsk0 & lsk1 & bpre & bslots & instruction [ phase=1; ]
 {
+    build lsk1;
+    build lsk0;
     build bpre;
     build instruction;
     build bslots;
@@ -970,8 +1004,8 @@ Mv_dest: destreg_7 is destreg_7 & destgrp=7 { export destreg_7; }
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 
 :ASHIFT Dreg0 >>>= Dreg3 is op6=0x10 & opc0609=0  & Dreg3 & Dreg0 { Dreg0 = Dreg0 s>> Dreg3; }
-:LSHIFT Dreg0 >>= Dreg3  is op6=0x10 & opc0609=1  & Dreg3 & Dreg0 { Dreg0 = Dreg0 >> Dreg3; }
-:LSHIFT Dreg0 <<= Dreg3  is op6=0x10 & opc0609=2  & Dreg3 & Dreg0 { Dreg0 = Dreg0 << Dreg3; }
+:LSHIFT Dreg0 >>= Dreg3  is op6=0x10 & opc0609=1  & Dreg3 & Dreg0 { Dreg0 = Dreg0 >> Dreg3; setNZ(Dreg0); }
+:LSHIFT Dreg0 <<= Dreg3  is op6=0x10 & opc0609=2  & Dreg3 & Dreg0 { Dreg0 = Dreg0 << Dreg3; setNZ(Dreg0); }
 :MULT Dreg0 *= Dreg3     is op6=0x10 & opc0609=3  & Dreg3 & Dreg0 { Dreg0 = Dreg0 * Dreg3; }
 :ADD Dreg0 = (Dreg0_2 + Dreg3) << 1 is op6=0x10 & opc0609=4 & Dreg3 & Dreg0 & Dreg0_2 { Dreg0 = (Dreg0 + Dreg3)*2; }
 :ADD Dreg0 = (Dreg0_2 + Dreg3) << 2 is op6=0x10 & opc0609=5 & Dreg3 & Dreg0 & Dreg0_2 { Dreg0 = (Dreg0 + Dreg3)*4; }
@@ -982,8 +1016,8 @@ Mv_dest: destreg_7 is destreg_7 & destgrp=7 { export destreg_7; }
 :MOVE Dreg0 = Dreg_l3 "(Z)" is op6=0x10 & opc0609=11 & Dreg_l3 & Dreg0 { Dreg0 = zext(Dreg_l3); }
 :MOVE Dreg0 = Dreg_b3 "(X)" is op6=0x10 & opc0609=12 & Dreg_b3 & Dreg0 { Dreg0 = sext(Dreg_b3); }
 :MOVE Dreg0 = Dreg_b3 "(Z)" is op6=0x10 & opc0609=13 & Dreg_b3 & Dreg0 { Dreg0 = zext(Dreg_b3); }
-:NEG  Dreg0 = -Dreg3        is op6=0x10 & opc0609=14 & Dreg3   & Dreg0 { Dreg0 = -Dreg3; }
-:NOT  Dreg0 = ~Dreg3        is op6=0x10 & opc0609=15 & Dreg3   & Dreg0 { Dreg0 = ~Dreg3; }
+:NEG  Dreg0 = -Dreg3        is op6=0x10 & opc0609=14 & Dreg3   & Dreg0 { AC0flag = Dreg3 == 0; Dreg0 = -Dreg3; setNZ(Dreg0); }
+:NOT  Dreg0 = ~Dreg3        is op6=0x10 & opc0609=15 & Dreg3   & Dreg0 { Dreg0 = ~Dreg3; setNZ(Dreg0); AC0flag = 0; Vflag = 0; }
 
 
 #####
@@ -1016,8 +1050,8 @@ Mv_dest: destreg_7 is destreg_7 & destgrp=7 { export destreg_7; }
 :BITTGL (Dreg0, uimm50307)   is op5=0x9 & opc0810=3 & uimm50307 & Dreg0 { Dreg0 = Dreg0 ^ (1 << uimm50307); }
 :BITCLR (Dreg0, uimm50307)   is op5=0x9 & opc0810=4 & uimm50307 & Dreg0 { Dreg0 = Dreg0 & ~(1 << uimm50307); }
 :ASHIFT Dreg0 >>>= uimm50307 is op5=0x9 & opc0810=5 & uimm50307 & Dreg0 { Dreg0 = Dreg0 s>> uimm50307; }
-:LSHIFT Dreg0 >>= uimm50307  is op5=0x9 & opc0810=6 & uimm50307 & Dreg0 { Dreg0 = Dreg0 >> uimm50307; }
-:LSHIFT Dreg0 <<= uimm50307  is op5=0x9 & opc0810=7 & uimm50307 & Dreg0 { Dreg0 = Dreg0 << uimm50307; }
+:LSHIFT Dreg0 >>= uimm50307  is op5=0x9 & opc0810=6 & uimm50307 & Dreg0 { Dreg0 = Dreg0 >> uimm50307; setNZ(Dreg0); }
+:LSHIFT Dreg0 <<= uimm50307  is op5=0x9 & opc0810=7 & uimm50307 & Dreg0 { Dreg0 = Dreg0 << uimm50307; setNZ(Dreg0); }
 
 
 #####
@@ -1027,11 +1061,11 @@ Mv_dest: destreg_7 is destreg_7 & destgrp=7 { export destreg_7; }
 # | 0 | 1 | 0 | 1 |.opc.......|.dest......|.src1......|.src0......|
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 
-:ADD Dreg6 = Dreg0 + Dreg3 is op4=0x5 & opc0911=0 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 + Dreg3; }
-:SUB Dreg6 = Dreg0 - Dreg3 is op4=0x5 & opc0911=1 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 - Dreg3; }
-:AND Dreg6 = Dreg0 & Dreg3 is op4=0x5 & opc0911=2 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 & Dreg3; }
-:OR  Dreg6 = Dreg0 | Dreg3 is op4=0x5 & opc0911=3 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 | Dreg3; }
-:XOR Dreg6 = Dreg0 "^" Dreg3 is op4=0x5 & opc0911=4 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 ^ Dreg3; }
+:ADD Dreg6 = Dreg0 + Dreg3 is op4=0x5 & opc0911=0 & Dreg6 & Dreg3 & Dreg0 { AC0flag = carry(Dreg0, Dreg3); Vflag = scarry(Dreg0, Dreg3); Dreg6 = Dreg0 + Dreg3; setNZ(Dreg6); }
+:SUB Dreg6 = Dreg0 - Dreg3 is op4=0x5 & opc0911=1 & Dreg6 & Dreg3 & Dreg0 { AC0flag = Dreg0 >= Dreg3; Vflag = sborrow(Dreg0, Dreg3); Dreg6 = Dreg0 - Dreg3; setNZ(Dreg6); }
+:AND Dreg6 = Dreg0 & Dreg3 is op4=0x5 & opc0911=2 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 & Dreg3; setNZ(Dreg6); AC0flag = 0; Vflag = 0; }
+:OR  Dreg6 = Dreg0 | Dreg3 is op4=0x5 & opc0911=3 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 | Dreg3; setNZ(Dreg6); AC0flag = 0; Vflag = 0; }
+:XOR Dreg6 = Dreg0 "^" Dreg3 is op4=0x5 & opc0911=4 & Dreg6 & Dreg3 & Dreg0 { Dreg6 = Dreg0 ^ Dreg3; setNZ(Dreg6); AC0flag = 0; Vflag = 0; }
 :ADD Preg6 = Preg0 + Preg3 is op4=0x5 & opc0911=5 & Preg6 & Preg3 & Preg0 { Preg6 = Preg0 + Preg3; }
 :ADD Preg6 = Preg0 + (Preg3 << 1) is op4=0x5 & opc0911=6 & Preg6 & Preg3 & Preg0 { Preg6 = Preg0 + Preg3*2; }
 :ADD Preg6 = Preg0 + (Preg3 << 2) is op4=0x5 & opc0911=7 & Preg6 & Preg3 & Preg0 { Preg6 = Preg0 + Preg3*4; }
@@ -1117,25 +1151,25 @@ LdSt_ldptr: "B" LdSt_ptr "(X)"  is LdSt_sz=2 & LdSt_z=1 & LdSt_ptr   { tmp:4 = s
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 # ToDo: circular buffer handling
 
-LdI_ptr4: [Ireg3++] is inslot=0 & aop0708=0 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 + 4; export tmp; }
-LdI_ptr4: [Ireg3--] is inslot=0 & aop0708=1 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 - 4; export tmp; }
+LdI_ptr4: [Ireg3++] is inslot=0 & aop0708=0 & Ireg3 & Ibreg3 & Ilreg3 { local tmp:4 = Ireg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 4:4); export tmp; }
+LdI_ptr4: [Ireg3--] is inslot=0 & aop0708=1 & Ireg3 & Ibreg3 & Ilreg3 { local tmp:4 = Ireg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 0xfffffffc:4); export tmp; }
 LdI_ptr4: [Ireg3]   is inslot=0 & aop0708=2 & Ireg3 { export Ireg3; }
-LdI_ptr4: [Ireg3++] is inslot=1 & aop0708=0 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 + 4; export tmp; }
-LdI_ptr4: [Ireg3--] is inslot=1 & aop0708=1 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 - 4; export tmp; }
+LdI_ptr4: [Ireg3++] is inslot=1 & aop0708=0 & Ireg3 & SIreg3 & Ibreg3 & Ilreg3 { local tmp:4 = SIreg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 4:4); export tmp; }
+LdI_ptr4: [Ireg3--] is inslot=1 & aop0708=1 & Ireg3 & SIreg3 & Ibreg3 & Ilreg3 { local tmp:4 = SIreg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 0xfffffffc:4); export tmp; }
 LdI_ptr4: [Ireg3]   is inslot=1 & aop0708=2 & Ireg3 & SIreg3 { export SIreg3; }
 
-LdI_ptr2: [Ireg3++] is inslot=0 & aop0708=0 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 + 2; export tmp; }
-LdI_ptr2: [Ireg3--] is inslot=0 & aop0708=1 & Ireg3 { local tmp:4 = Ireg3; Ireg3 = Ireg3 - 2; export tmp; }
+LdI_ptr2: [Ireg3++] is inslot=0 & aop0708=0 & Ireg3 & Ibreg3 & Ilreg3 { local tmp:4 = Ireg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 2:4); export tmp; }
+LdI_ptr2: [Ireg3--] is inslot=0 & aop0708=1 & Ireg3 & Ibreg3 & Ilreg3 { local tmp:4 = Ireg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 0xfffffffe:4); export tmp; }
 LdI_ptr2: [Ireg3]   is inslot=0 & aop0708=2 & Ireg3 { export Ireg3; }
-LdI_ptr2: [Ireg3++] is inslot=1 & aop0708=0 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 + 2; export tmp; }
-LdI_ptr2: [Ireg3--] is inslot=1 & aop0708=1 & Ireg3 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 - 2; export tmp; }
+LdI_ptr2: [Ireg3++] is inslot=1 & aop0708=0 & Ireg3 & SIreg3 & Ibreg3 & Ilreg3 { local tmp:4 = SIreg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 2:4); export tmp; }
+LdI_ptr2: [Ireg3--] is inslot=1 & aop0708=1 & Ireg3 & SIreg3 & Ibreg3 & Ilreg3 { local tmp:4 = SIreg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, 0xfffffffe:4); export tmp; }
 LdI_ptr2: [Ireg3]   is inslot=1 & aop0708=2 & Ireg3 & SIreg3 { export SIreg3; }
 
 :LOAD Dreg0 = LdI_ptr4         is op6=0x27 & w09=0 & aop0708!=3 & LdI_ptr4 & Mreg5=0 & Dreg0   { Dreg0 = *:4 LdI_ptr4; }
 :LOAD Dreg_l0 = "W" LdI_ptr2   is op6=0x27 & w09=0 & aop0708!=3 & LdI_ptr2 & Mreg5=1 & Dreg_l0 { Dreg_l0 = *:2 LdI_ptr2; }
 :LOAD Dreg_h0 = "W" LdI_ptr2   is op6=0x27 & w09=0 & aop0708!=3 & LdI_ptr2 & Mreg5=2 & Dreg_h0 { Dreg_h0 = *:2 LdI_ptr2; }
-LdI_pm: [Ireg3 ++ Mreg5] is inslot=0 & Ireg3 & Mreg5          { local tmp:4 = Ireg3; Ireg3 = Ireg3 + Mreg5; export tmp; }
-LdI_pm: [Ireg3 ++ Mreg5] is inslot=1 & Ireg3 & Mreg5 & SIreg3 { local tmp:4 = SIreg3; Ireg3 = SIreg3 + Mreg5; export tmp; }
+LdI_pm: [Ireg3 ++ Mreg5] is inslot=0 & Ireg3 & Mreg5 & Ibreg3 & Ilreg3          { local tmp:4 = Ireg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, Mreg5); export tmp; }
+LdI_pm: [Ireg3 ++ Mreg5] is inslot=1 & Ireg3 & Mreg5 & SIreg3 & Ibreg3 & Ilreg3 { local tmp:4 = SIreg3; circ_mod(Ireg3, tmp, Ibreg3, Ilreg3, Mreg5); export tmp; }
 :LOAD Dreg0 = LdI_pm is op6=0x27 & w09=0 & aop0708=3  & LdI_pm & Dreg0 { Dreg0 = *:4 LdI_pm; }
 
 :STORE LdI_ptr4 = st_d0         is op6=0x27 & w09=1 & aop0708!=3 & LdI_ptr4 & Mreg5=0 & st_d0   { *:4 LdI_ptr4 = st_d0; }
@@ -1150,11 +1184,10 @@ LdI_pm: [Ireg3 ++ Mreg5] is inslot=1 & Ireg3 & Mreg5 & SIreg3 { local tmp:4 = SI
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 # | 1 | 0 | 0 | 1 | 1 | 1 | 1 | 0 |.b.| 1 | 1 |.op|.mreg..|.ireg..|
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
-# ToDo: circular buffer handling
 
-:ADD Ireg0 += Mreg2          is op8=0x9e & b07=0 & op0406=6 & Mreg2 & Ireg0 { Ireg0 = Ireg0 + Mreg2; }
+:ADD Ireg0 += Mreg2          is op8=0x9e & b07=0 & op0406=6 & Mreg2 & Ireg0 & Ibreg0 & Ilreg0 { circ_mod(Ireg0, Ireg0, Ibreg0, Ilreg0, Mreg2); }
 :ADD Ireg0 += Mreg2 "(brev)" is op8=0x9e & b07=1 & op0406=6 & Mreg2 & Ireg0 { Ireg0 = brev_add(Ireg0, Mreg2); }
-:SUB Ireg0 -= Mreg2          is op8=0x9e & b07=0 & op0406=7 & Mreg2 & Ireg0 { Ireg0 = Ireg0 - Mreg2; }
+:SUB Ireg0 -= Mreg2          is op8=0x9e & b07=0 & op0406=7 & Mreg2 & Ireg0 & Ibreg0 & Ilreg0 { local d:4 = 0 - Mreg2; circ_mod(Ireg0, Ireg0, Ibreg0, Ilreg0, d); }
 
 
 #####
@@ -1163,12 +1196,11 @@ LdI_pm: [Ireg3 ++ Mreg5] is inslot=1 & Ireg3 & Mreg5 & SIreg3 { local tmp:4 = SI
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
 # | 1 | 0 | 0 | 1 | 1 | 1 | 1 | 1 | 0 | 1 | 1 | 0 |.opc...|.ireg..|
 # +---+---+---+---|---+---+---+---|---+---+---+---|---+---+---+---+
-# ToDo: circular buffer handling
 
-:ADD Ireg0 += 2 is op12=0x9f6 & opc0203=0 & Ireg0 { Ireg0 = Ireg0 + 2; }
-:SUB Ireg0 -= 2 is op12=0x9f6 & opc0203=1 & Ireg0 { Ireg0 = Ireg0 - 2; }
-:ADD Ireg0 += 4 is op12=0x9f6 & opc0203=2 & Ireg0 { Ireg0 = Ireg0 + 4; }
-:SUB Ireg0 -= 4 is op12=0x9f6 & opc0203=3 & Ireg0 { Ireg0 = Ireg0 - 4; }
+:ADD Ireg0 += 2 is op12=0x9f6 & opc0203=0 & Ireg0 & Ibreg0 & Ilreg0 { circ_mod(Ireg0, Ireg0, Ibreg0, Ilreg0, 2:4); }
+:SUB Ireg0 -= 2 is op12=0x9f6 & opc0203=1 & Ireg0 & Ibreg0 & Ilreg0 { circ_mod(Ireg0, Ireg0, Ibreg0, Ilreg0, 0xfffffffe:4); }
+:ADD Ireg0 += 4 is op12=0x9f6 & opc0203=2 & Ireg0 & Ibreg0 & Ilreg0 { circ_mod(Ireg0, Ireg0, Ibreg0, Ilreg0, 4:4); }
+:SUB Ireg0 -= 4 is op12=0x9f6 & opc0203=3 & Ireg0 & Ibreg0 & Ilreg0 { circ_mod(Ireg0, Ireg0, Ibreg0, Ilreg0, 0xfffffffc:4); }
 
 
 #####
@@ -1404,6 +1436,94 @@ MUL1: xreg3_h * xreg0_h is xh01=1 & xh11=1 & mmodval & xreg3_h & xreg0_h { local
 define pcodeop mac32_acc;
 define pcodeop mac32_read;
 
+# A1:0 as a 72-bit value (PRM "40-Bit Accumulator Registers"): bits 71..64 = A1.X, 63..32 = A1.W,
+# 31..0 = A0.W; A0.X is not used. Kept here as hi (8-byte, value of A1.X) : lo (A1.W:A0.W).
+# Products (PRM "Data Types"): signed/mixed fractional modes (default, t, m, m,t) shift the 64-bit
+# product left by 1; integer and unsigned-fractional modes do not. Accumulation saturates to 72 bits
+# (unsigned for fu/tfu/iu) except in the (ns) modes. Checked against the firmware's own fixed-point
+# self-test (A1:0 = a*b, Dreg = A1:0, += and -= cases).
+macro mac32_op(op, mv, a, b) {
+    local mvv:1 = mv;
+    local ua:1 = (mvv >= 4) && (mvv <= 7);
+    local ub:1 = ua || (mvv >= 8);
+    local pa:8 = (sext(a) * zext(ua == 0)) + (zext(a) * zext(ua));
+    local pb:8 = (sext(b) * zext(ub == 0)) + (zext(b) * zext(ub));
+    local pr:8 = pa * pb;
+    local frac:1 = (mvv == 0) || (mvv == 1) || (mvv == 8) || (mvv == 9);
+    local plo:8 = pr << zext(frac);
+    local phi:8 = (pr s>> 63) * zext(ua == 0);
+    local alo:8 = (zext(A1.W) << 32) | zext(A0.W);
+    local ax:1 = A1.X:1;
+    local ahi:8 = (sext(ax) * zext(ua == 0)) + (zext(ax) * zext(ua));
+    local cy:1 = carry(alo, plo);
+    local bw:1 = alo < plo;
+    local slo:8 = alo + plo; local shi:8 = ahi + phi + zext(cy);
+    local dlo:8 = alo - plo; local dhi:8 = ahi - phi - zext(bw);
+    local iss:1 = op == 0; local isa:1 = op == 1; local isu:1 = op == 2;
+    local nlo:8 = (plo * zext(iss)) + (slo * zext(isa)) + (dlo * zext(isu));
+    local nhi:8 = (phi * zext(iss)) + (shi * zext(isa)) + (dhi * zext(isu));
+    local ns:1 = (mvv == 3) || (mvv == 7) || (mvv == 11);
+    local oh:1 = (ns == 0) && (((ua == 0) && (nhi s> 127)) || (ua && (nhi s> 255)));
+    local ol:1 = (ns == 0) && (((ua == 0) && (nhi s< 0xffffffffffffff80)) || (ua && (nhi s< 0)));
+    local keep:1 = (oh == 0) && (ol == 0);
+    local maxhi:8 = (127 * zext(ua == 0)) + (255 * zext(ua));
+    nlo = (nlo * zext(keep)) + (0xffffffffffffffff * zext(oh));
+    nhi = (nhi * zext(keep)) + (maxhi * zext(oh)) + (0xffffffffffffff80 * zext(ol && (ua == 0)));
+    A0.W = nlo:4;
+    local nx:1 = nhi:1;
+    A1 = (sext(nx) << 32) | (nlo >> 32);
+}
+
+# Dreg = A1:0. Fractional modes: bits 63..32 rounded (round half to even, or half up when
+# RND_MOD is set; truncated in t/tfu/m,t) and saturated to 32 bits (unsigned for fu/tfu).
+# Integer modes: the low 32 bits, saturated (s32 for is/m,is; u32 for iu) unless (ns).
+macro mac32_rd32(dst, mv) {
+    local mvv:1 = mv;
+    local ua:1 = (mvv >= 4) && (mvv <= 7);
+    local lo:8 = (zext(A1.W) << 32) | zext(A0.W);
+    local ax:1 = A1.X:1;
+    local hi:8 = (sext(ax) * zext(ua == 0)) + (zext(ax) * zext(ua));
+    local intm:1 = (mvv == 2) || (mvv == 3) || (mvv == 6) || (mvv == 7) || (mvv == 10) || (mvv == 11);
+    local ns:1 = (mvv == 3) || (mvv == 7) || (mvv == 11);
+    local neg:1 = hi s< 0;
+    local l32s:8 = sext(lo:4);
+    local fs:1 = (hi == (l32s s>> 63)) && (lo == l32s);
+    local isat:8 = (l32s * zext(fs)) + (0x7fffffff * zext((fs == 0) && (neg == 0))) + (0xffffffff80000000 * zext((fs == 0) && neg));
+    local fu:1 = (hi == 0) && (lo <= 0xffffffff);
+    local usat:8 = (lo * zext(fu)) + (0xffffffff * zext((fu == 0) && (neg == 0)));
+    local ival:8 = (zext(lo:4) * zext(ns)) + (((isat * zext(ua == 0)) + (usat * zext(ua))) * zext(ns == 0));
+    local q:8 = (hi << 32) | (lo >> 32);
+    local rem:8 = lo & 0xffffffff;
+    local tr:1 = (mvv == 1) || (mvv == 5) || (mvv == 9);
+    local up:1 = (tr == 0) && ((rem > 0x80000000) || ((rem == 0x80000000) && (RND_MODflag || ((q & 1) != 0))));
+    q = q + zext(up);
+    local qs:8; sat_s32(qs, q);
+    local qu:8 = (q * zext((q s>= 0) && (q <= 0xffffffff))) + (0xffffffff * zext(q s> 0xffffffff));
+    local fval:8 = (qs * zext(ua == 0)) + (qu * zext(ua));
+    local r:8 = (ival * zext(intm)) + (fval * zext(intm == 0));
+    dst = r:4;
+}
+
+# Dreg_pair = A1:0: the low 64 bits, saturated to 64 bits (unsigned for fu/tfu/iu) unless (ns).
+# (Not exercised by the firmware's self-test; no instance in the reference image.)
+macro mac32_rd64(dlo, dhi, mv) {
+    local mvv:1 = mv;
+    local ua:1 = (mvv >= 4) && (mvv <= 7);
+    local lo:8 = (zext(A1.W) << 32) | zext(A0.W);
+    local ax:1 = A1.X:1;
+    local hi:8 = (sext(ax) * zext(ua == 0)) + (zext(ax) * zext(ua));
+    local ns:1 = (mvv == 3) || (mvv == 7) || (mvv == 11);
+    local neg:1 = hi s< 0;
+    local fs:1 = hi == (lo s>> 63);
+    local fu:1 = hi == 0;
+    local ok:1 = ns || ((ua == 0) && fs) || (ua && fu);
+    local smax:8 = (0x7fffffffffffffff * zext(ua == 0)) + (0xffffffffffffffff * zext(ua));
+    local smin:8 = 0x8000000000000000 * zext(ua == 0);
+    local r:8 = (lo * zext(ok)) + (smax * zext((ok == 0) && (neg == 0))) + (smin * zext((ok == 0) && neg));
+    dlo = r:4;
+    dhi = r(4);
+}
+
 M32MODE:            is mmod0508=0  { }
 M32MODE: "(t)"      is mmod0508=1  { }
 M32MODE: "(is)"     is mmod0508=2  { }
@@ -1524,9 +1644,7 @@ M32P: xreg3 * xreg0 "(m,is,ns)" is mmod0508=11 ; xreg3 & xreg0 { local res:8 = s
 :MAC^p "A1:0" A10OP xreg3 * xreg0 M32MODE
     is p & op0910=1 & op10001=1 & mm04=0 & p03=0 & w102=0 & mmod0508 & M32MODE ; xw0=0 & A10OP & xop01112 & xreg3 & xreg0
 {
-    local a0:8 = A0; local a1:8 = A1;
-    A0 = mac32_acc(a0, a1, xreg3, xreg0, xop01112:1, mmod0508:1, 0:1);
-    A1 = mac32_acc(a0, a1, xreg3, xreg0, xop01112:1, mmod0508:1, 1:1);
+    mac32_op(xop01112:1, mmod0508:1, xreg3, xreg0);
     build p;
 }
 
@@ -1534,20 +1652,15 @@ M32P: xreg3 * xreg0 "(m,is,ns)" is mmod0508=11 ; xreg3 & xreg0 { local res:8 = s
 :MAC^p xreg6 = ("A1:0" A10OP xreg3 * xreg0) M32MODE
     is p & op0910=1 & op10001=1 & mm04=0 & p03=0 & w102=0 & mmod0508 & M32MODE ; xw0=1 & A10OP & xop01112 & xreg6 & xreg3 & xreg0
 {
-    local a0:8 = A0; local a1:8 = A1;
-    A0 = mac32_acc(a0, a1, xreg3, xreg0, xop01112:1, mmod0508:1, 0:1);
-    A1 = mac32_acc(a0, a1, xreg3, xreg0, xop01112:1, mmod0508:1, 1:1);
-    xreg6 = mac32_read(A0, A1, mmod0508:1, 0:1);
+    mac32_op(xop01112:1, mmod0508:1, xreg3, xreg0);
+    mac32_rd32(xreg6, mmod0508:1);
     build p;
 }
 :MAC^p xreg6_o^":"^xreg6_e = ("A1:0" A10OP xreg3 * xreg0) M32MODE
     is p & op0910=1 & op10001=1 & mm04=0 & p03=1 & w102=0 & mmod0508 & M32MODE ; xw0=1 & A10OP & xop01112 & xreg6_o & xreg6_e & xreg3 & xreg0
 {
-    local a0:8 = A0; local a1:8 = A1;
-    A0 = mac32_acc(a0, a1, xreg3, xreg0, xop01112:1, mmod0508:1, 0:1);
-    A1 = mac32_acc(a0, a1, xreg3, xreg0, xop01112:1, mmod0508:1, 1:1);
-    xreg6_e = mac32_read(A0, A1, mmod0508:1, 0:1);
-    xreg6_o = mac32_read(A0, A1, mmod0508:1, 1:1);
+    mac32_op(xop01112:1, mmod0508:1, xreg3, xreg0);
+    mac32_rd64(xreg6_e, xreg6_o, mmod0508:1);
     build p;
 }
 
@@ -1555,14 +1668,13 @@ M32P: xreg3 * xreg0 "(m,is,ns)" is mmod0508=11 ; xreg3 & xreg0 { local res:8 = s
 :MAC^p xreg6 = "A1:0" M32MODE
     is p & op0910=1 & op10001=1 & mm04=0 & p03=0 & w102=0 & mmod0508 & M32MODE ; xw0=1 & xop01112=3 & xreg6
 {
-    xreg6 = mac32_read(A0, A1, mmod0508:1, 0:1);
+    mac32_rd32(xreg6, mmod0508:1);
     build p;
 }
 :MAC^p xreg6_o^":"^xreg6_e = "A1:0" M32MODE
     is p & op0910=1 & op10001=1 & mm04=0 & p03=1 & w102=0 & mmod0508 & M32MODE ; xw0=1 & xop01112=3 & xreg6_o & xreg6_e
 {
-    xreg6_e = mac32_read(A0, A1, mmod0508:1, 0:1);
-    xreg6_o = mac32_read(A0, A1, mmod0508:1, 1:1);
+    mac32_rd64(xreg6_e, xreg6_o, mmod0508:1);
     build p;
 }
 @endif
@@ -1745,34 +1857,42 @@ PAIR1: "R3:2" is xreg0=2 { export R2; }
 :ADDSUB^p xreg6 = xreg3 +|+ xreg0, xreg9 = xreg3_2 -|- xreg0_2 SXA is p & op0610=0x10 & hl05=0 & aopc0004=1 ; SXA & xreg9 & xreg6 & xreg3 & xreg3_2 & xreg0 & xreg0_2 { xreg6 = (zext(xreg3[16,16] + xreg0[16,16]) << 16) | zext(xreg3[0,16] + xreg0[0,16]); xreg9 = (zext(xreg3_2[16,16] - xreg0_2[16,16]) << 16) | zext(xreg3_2[0,16] - xreg0_2[0,16]); build p; }
 :ADDSUB^p xreg6 = xreg3 +|- xreg0, xreg9 = xreg3_2 -|+ xreg0_2 SXA is p & op0610=0x10 & hl05=1 & aopc0004=1 ; SXA & xreg9 & xreg6 & xreg3 & xreg3_2 & xreg0 & xreg0_2 { xreg6 = (zext(xreg3[16,16] + xreg0[16,16]) << 16) | zext(xreg3[0,16] - xreg0[0,16]); xreg9 = (zext(xreg3_2[16,16] - xreg0_2[16,16]) << 16) | zext(xreg3_2[0,16] + xreg0_2[0,16]); build p; }
 
-:ADD^p DDST0 = DSRC0 + DSRC1 "(s)" is (p & op0610=0x10 & aopc0004=2 ; xx12=0 & xs13=1 & DSRC0 & DSRC1) & DDST0 { local r:8 = sext(DSRC0) + sext(DSRC1); sat_s16(r,r); DDST0 = r:2; build p; }
+:ADD^p DDST0 = DSRC0 + DSRC1 "(s)" is (p & op0610=0x10 & aopc0004=2 ; xx12=0 & xs13=1 & DSRC0 & DSRC1) & DDST0 { local r:8 = sext(DSRC0) + sext(DSRC1); sat_s16(r,r); DDST0 = r:2; setNZ(DDST0); build p; }
 :ADD^p DDST0 = DSRC0 + DSRC1 "(ns)"
     is (p & op0610=0x10 & aopc0004=2 ; xx12=0 & xs13=0 & DSRC0 & DSRC1) & DDST0
 {
     DDST0 = DSRC0 + DSRC1;
+    setNZ(DDST0);
     build p;
 }
 
-:SUB^p DDST0 = DSRC0 - DSRC1 "(s)" is (p & op0610=0x10 & aopc0004=3 ; xx12=0 & xs13=1 & DSRC0 & DSRC1) & DDST0 { local r:8 = sext(DSRC0) - sext(DSRC1); sat_s16(r,r); DDST0 = r:2; build p; }
+:SUB^p DDST0 = DSRC0 - DSRC1 "(s)" is (p & op0610=0x10 & aopc0004=3 ; xx12=0 & xs13=1 & DSRC0 & DSRC1) & DDST0 { local r:8 = sext(DSRC0) - sext(DSRC1); sat_s16(r,r); DDST0 = r:2; setNZ(DDST0); build p; }
 :SUB^p DDST0 = DSRC0 - DSRC1 "(ns)"
     is (p & op0610=0x10 & aopc0004=3 ; xx12=0 & xs13=0 & DSRC0 & DSRC1) & DDST0
 {
     DDST0 = DSRC0 - DSRC1;
+    setNZ(DDST0);
     build p;
 }
 
-:ADD^p xreg9 = xreg3 + xreg0 "(s)" is p & op0610=0x10 & aopc0004=4 & hl05=0 ; xaop1415=0 & xx12=0 & xs13=1 & xreg9 & xreg3 & xreg0 { local r:8 = sext(xreg3) + sext(xreg0); sat_s32(r,r); xreg9 = r:4; build p; }
+:ADD^p xreg9 = xreg3 + xreg0 "(s)" is p & op0610=0x10 & aopc0004=4 & hl05=0 ; xaop1415=0 & xx12=0 & xs13=1 & xreg9 & xreg3 & xreg0 { AC0flag = carry(xreg3, xreg0); local r:8 = sext(xreg3) + sext(xreg0); sat_s32(r,r); xreg9 = r:4; setNZ(xreg9); build p; }
 :ADD^p xreg9 = xreg3 + xreg0 "(ns)"
     is p & op0610=0x10 & aopc0004=4 & hl05=0 ; xaop1415=0 & xx12=0 & xs13=0 & xreg9 & xreg3 & xreg0
 {
+    AC0flag = carry(xreg3, xreg0);
+    Vflag = scarry(xreg3, xreg0);
     xreg9 = xreg3 + xreg0;
+    setNZ(xreg9);
     build p;
 }
-:SUB^p xreg9 = xreg3 - xreg0 "(s)" is p & op0610=0x10 & aopc0004=4 & hl05=0 ; xaop1415=1 & xx12=0 & xs13=1 & xreg9 & xreg3 & xreg0 { local r:8 = sext(xreg3) - sext(xreg0); sat_s32(r,r); xreg9 = r:4; build p; }
+:SUB^p xreg9 = xreg3 - xreg0 "(s)" is p & op0610=0x10 & aopc0004=4 & hl05=0 ; xaop1415=1 & xx12=0 & xs13=1 & xreg9 & xreg3 & xreg0 { AC0flag = xreg3 >= xreg0; local r:8 = sext(xreg3) - sext(xreg0); sat_s32(r,r); xreg9 = r:4; setNZ(xreg9); build p; }
 :SUB^p xreg9 = xreg3 - xreg0 "(ns)"
     is p & op0610=0x10 & aopc0004=4 & hl05=0 ; xaop1415=1 & xx12=0 & xs13=0 & xreg9 & xreg3 & xreg0
 {
+    AC0flag = xreg3 >= xreg0;
+    Vflag = sborrow(xreg3, xreg0);
     xreg9 = xreg3 - xreg0;
+    setNZ(xreg9);
     build p;
 }
 
@@ -1825,9 +1945,9 @@ PAIR1: "R3:2" is xreg0=2 { export R2; }
 :ADD^p DDST0 = xreg3 + xreg0 "(rnd20)" is (p & op0610=0x10 & aopc0004=5 ; xaop1415=2 & xsx1213=1 & xreg9 & xreg3 & xreg0) & DDST0 { local r:4 = (xreg3 + xreg0) s>> 20; DDST0 = r:2; build p; }
 :SUB^p DDST0 = xreg3 - xreg0 "(rnd20)" is (p & op0610=0x10 & aopc0004=5 ; xaop1415=3 & xsx1213=1 & xreg9 & xreg3 & xreg0) & DDST0 { local r:4 = (xreg3 - xreg0) s>> 20; DDST0 = r:2; build p; }
 
-:MAX^p xreg9 = "max"(xreg3, xreg0) "(v)" is p & op0610=0x10 & hl05=0 & aopc0004=6 ; xaop1415=0 & xsx1213=0 & xreg9 & xreg3 & xreg0 { xreg9 = vit_max(xreg3, xreg0); build p; }
-:MIN^p xreg9 = "min"(xreg3, xreg0) "(v)" is p & op0610=0x10 & hl05=0 & aopc0004=6 ; xaop1415=1 & xsx1213=0 & xreg9 & xreg3 & xreg0 { xreg9 = vit_max(xreg0, xreg3); build p; }
-:ABS^p xreg9 = "abs" xreg3 "(v)"         is p & op0610=0x10 & hl05=0 & aopc0004=6 ; xaop1415=2 & xsx1213=0 & xreg9 & xreg3 { xreg9 = abs_vec(xreg3); build p; }
+:MAX^p xreg9 = "max"(xreg3, xreg0) "(v)" is p & op0610=0x10 & hl05=0 & aopc0004=6 ; xaop1415=0 & xsx1213=0 & xreg9 & xreg3 & xreg0 { local ah:2 = xreg3(2); local al:2 = xreg3:2; local bh:2 = xreg0(2); local bl:2 = xreg0:2; local rh:2 = (ah * zext(ah s>= bh)) + (bh * zext(ah s< bh)); local rl:2 = (al * zext(al s>= bl)) + (bl * zext(al s< bl)); xreg9 = (zext(rh) << 16) | zext(rl); build p; }
+:MIN^p xreg9 = "min"(xreg3, xreg0) "(v)" is p & op0610=0x10 & hl05=0 & aopc0004=6 ; xaop1415=1 & xsx1213=0 & xreg9 & xreg3 & xreg0 { local ah:2 = xreg3(2); local al:2 = xreg3:2; local bh:2 = xreg0(2); local bl:2 = xreg0:2; local rh:2 = (ah * zext(ah s<= bh)) + (bh * zext(ah s> bh)); local rl:2 = (al * zext(al s<= bl)) + (bl * zext(al s> bl)); xreg9 = (zext(rh) << 16) | zext(rl); build p; }
+:ABS^p xreg9 = "abs" xreg3 "(v)"         is p & op0610=0x10 & hl05=0 & aopc0004=6 ; xaop1415=2 & xsx1213=0 & xreg9 & xreg3 { local xh:2 = xreg3(2); local xl:2 = xreg3:2; local h:8; abs8(h, sext(xh)); sat_s16(h, h); local l:8; abs8(l, sext(xl)); sat_s16(l, l); xreg9 = (zext(h:2) << 16) | zext(l:2); build p; }
 
 :MAX^p xreg9 = "max"(xreg3, xreg0) is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=0 & xsx1213=0 & xreg9 & xreg3 & xreg0
 {
@@ -1839,9 +1959,9 @@ PAIR1: "R3:2" is xreg0=2 { export R2; }
     ternary(xreg9, (xreg3 s< xreg0), xreg3, xreg0);
     build p;
 }
-:ABS^p xreg9 = "abs" xreg3   is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=2 & xsx1213=0 & xreg9 & xreg3 { local r:8; abs8(r, sext(xreg3)); xreg9 = r:4; build p; }
-:NEG^p xreg9 = -xreg3 "(s)"  is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=3 & xx12=0 & xs13=1 & xreg9 & xreg3 { local r:8 = 0:8 - sext(xreg3); sat_s32(r,r); xreg9 = r:4; build p; }
-:NEG^p xreg9 = -xreg3 "(ns)" is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=3 & xx12=0 & xs13=0 & xreg9 & xreg3 { xreg9 = -xreg3; build p;}
+:ABS^p xreg9 = "abs" xreg3   is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=2 & xsx1213=0 & xreg9 & xreg3 { local r:8; abs8(r, sext(xreg3)); sat_s32(r, r); xreg9 = r:4; setNZ(xreg9); build p; }
+:NEG^p xreg9 = -xreg3 "(s)"  is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=3 & xx12=0 & xs13=1 & xreg9 & xreg3 { local r:8 = 0:8 - sext(xreg3); sat_s32(r,r); xreg9 = r:4; setNZ(xreg9); build p; }
+:NEG^p xreg9 = -xreg3 "(ns)" is p & op0610=0x10 & hl05=0 & aopc0004=7 ; xaop1415=3 & xx12=0 & xs13=0 & xreg9 & xreg3 { xreg9 = -xreg3; setNZ(xreg9); build p;}
 
 :CLR^p A0 = 0          is p & op0610=0x10 & hl05=0 & aopc0004=8 ; xaop1415=0 & xsx1213=0 & A0 { A0 = 0; build p;}
 :SAT^p A0 = "A0" "(s)" is p & op0610=0x10 & hl05=0 & aopc0004=8 ; xaop1415=0 & xsx1213=2 & A0 { local a:8; accext(a,A0); local s:8; sat_s32(s,a); accset(A0,s); build p; }
@@ -1886,7 +2006,7 @@ PAIR1: "R3:2" is xreg0=2 { export R2; }
 :NEG^p A1 = -"A1" is p & op0610=0x10 & hl05=1 & aopc0004=14 ; xaop1415=1 & xsx1213=0 & A1 { local a:8; accext(a,A1); a=0:8-a; sat_s40(a,a); accset(A1,a); build p; }
 :NEG^p A1 = -"A1", A0 = -"A0" is p & op0610=0x10 & hl05=0 & aopc0004=14 ; xaop1415=3 & xsx1213=0 & A1 & A0 { local a:8; accext(a,A1); a=0:8-a; sat_s40(a,a); accset(A1,a); local b:8; accext(b,A0); b=0:8-b; sat_s40(b,b); accset(A0,b); build p; }
 
-:NEG^p xreg9 = -xreg3 "(v)" is p & op0610=0x10 & hl05=0 & aopc0004=15 ; xaop1415=3 & xsx1213=0 & xreg9 & xreg3 { xreg9 = neg_vec(xreg3); build p; }
+:NEG^p xreg9 = -xreg3 "(v)" is p & op0610=0x10 & hl05=0 & aopc0004=15 ; xaop1415=3 & xsx1213=0 & xreg9 & xreg3 { local xh:2 = xreg3(2); local xl:2 = xreg3:2; local h:8 = 0:8 - sext(xh); sat_s16(h, h); local l:8 = 0:8 - sext(xl); sat_s16(l, l); xreg9 = (zext(h:2) << 16) | zext(l:2); build p; }
 
 :ABS^p A0 = "abs" "A0" is p & op0610=0x10 & hl05=0 & aopc0004=16 ; xaop1415=0 & xsx1213=0 & A0 { local a:8; accext(a,A0); abs8(a,a); sat_s40(a,a); accset(A0,a); build p; }
 :ABS^p A1 = "abs" A0   is p & op0610=0x10 & hl05=1 & aopc0004=16 ; xaop1415=0 & xsx1213=0 & A1 & A0 { local a:8; accext(a,A0); abs8(a,a); sat_s40(a,a); accset(A1,a); build p; }
@@ -2014,10 +2134,10 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 :VITMAX^p xreg9 = "vit_max"(xreg0, xreg3) "(asl)" is p & op0410=0x60 & sopc0003=9 ; xsop1415=2 & xhls1213=0 & xreg6=0 & xreg9 & xreg3 & xreg0 { xreg9 = vit_max(xreg0, xreg3); build p; }
 :VITMAX^p xreg9 = "vit_max"(xreg0, xreg3) "(asr)" is p & op0410=0x60 & sopc0003=9 ; xsop1415=3 & xhls1213=0 & xreg6=0 & xreg9 & xreg3 & xreg0 { xreg9 = vit_max(xreg3, xreg0); build p; }
 
-:EXTRACT^p xreg9 = "extract"(xreg0, xreg3_l) "(z)" is p & op0410=0x60 & sopc0003=10 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg9 & xreg3_l & xreg0 { xreg9 = extract_bf(xreg0, xreg3_l, 0:4); build p; }
-:EXTRACT^p xreg9 = "extract"(xreg0, xreg3_l) "(x)" is p & op0410=0x60 & sopc0003=10 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg9 & xreg3_l & xreg0 { xreg9 = extract_bf(xreg0, xreg3_l, 1:4); build p; }
-:DEPOSIT^p xreg9 = "deposit"(xreg0, xreg3)         is p & op0410=0x60 & sopc0003=10 ; xsop1415=2 & xhls1213=0 & xreg6=0 & xreg9 & xreg3 & xreg0 { xreg9 = deposit_bf(xreg0, xreg3, 0:4); build p; }
-:DEPOSIT^p xreg9 = "deposit"(xreg0, xreg3) "(x)"   is p & op0410=0x60 & sopc0003=10 ; xsop1415=3 & xhls1213=0 & xreg6=0 & xreg9 & xreg3 & xreg0 { xreg9 = deposit_bf(xreg0, xreg3, 1:4); build p; }
+:EXTRACT^p xreg9 = "extract"(xreg0, xreg3_l) "(z)" is p & op0410=0x60 & sopc0003=10 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg9 & xreg3_l & xreg0 { local pos:8 = zext((xreg3_l >> 8) & 0x1f); local len:8 = zext(xreg3_l & 0x1f); local v:8 = (zext(xreg0) >> pos) & ((1:8 << len) - 1); xreg9 = v:4; build p; }
+:EXTRACT^p xreg9 = "extract"(xreg0, xreg3_l) "(x)" is p & op0410=0x60 & sopc0003=10 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg9 & xreg3_l & xreg0 { local pos:8 = zext((xreg3_l >> 8) & 0x1f); local len:8 = zext(xreg3_l & 0x1f); local v:8 = (zext(xreg0) >> pos) & ((1:8 << len) - 1); local sh:8 = (64 - len) * zext(len != 0); v = (v << sh) s>> sh; xreg9 = v:4; build p; }
+:DEPOSIT^p xreg9 = "deposit"(xreg0, xreg3)         is p & op0410=0x60 & sopc0003=10 ; xsop1415=2 & xhls1213=0 & xreg6=0 & xreg9 & xreg3 & xreg0 { local pos:8 = zext((xreg3 >> 8) & 0x1f); local len:8 = zext(xreg3 & 0x1f); local m:8 = (1:8 << len) - 1; local fg:8 = zext(xreg3 >> 16) & m; local v:8 = (zext(xreg0) & ~(m << pos)) | (fg << pos); xreg9 = v:4; build p; }
+:DEPOSIT^p xreg9 = "deposit"(xreg0, xreg3) "(x)"   is p & op0410=0x60 & sopc0003=10 ; xsop1415=3 & xhls1213=0 & xreg6=0 & xreg9 & xreg3 & xreg0 { local pos:8 = zext((xreg3 >> 8) & 0x1f); local len:8 = zext(xreg3 & 0x1f); local m:8 = (1:8 << len) - 1; local fg:8 = zext(xreg3 >> 16) & m; local v:8 = (zext(xreg0) & ~(m << pos)) | (fg << pos); local w:8 = pos + len; local sh:8 = (64 - w) * zext((len != 0) && (w < 64)); v = (v << sh) s>> sh; xreg9 = v:4; build p; }
 
 :BXOR^p xreg9_l = "CC" = "bxorshift"(A0, xreg3) is p & op0410=0x60 & sopc0003=11 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg9_l & xreg3 & A0 { xreg9_l = bxorshift_op(A0, xreg3); CCflag = xreg9_l:1; build p; }
 :BXOR^p xreg9_l = "CC" = "bxor"(A0, xreg3)      is p & op0410=0x60 & sopc0003=11 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg9_l & xreg3 & A0 { xreg9_l = bxor_op(A0, xreg3); CCflag = xreg9_l:1; build p; }
@@ -2066,7 +2186,7 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 :ASH^p xreg9 = xreg0 >>> shift       is p & op0410=0x68 & sopc0003=2 ; xsop1415=0 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;] { xreg9 = xreg0 s>> shift; build p;}
 :ASH^p xreg9 = xreg0 << shift "(s)"  is p & op0410=0x68 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { local r:8 = sext(xreg0) << shift; sat_s32(r,r); xreg9 = r:4; build p;}
 :ASH^p xreg9 = xreg0 >>> shift "(s)" is p & op0410=0x68 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;] { xreg9 = xreg0 s>> shift; build p;}
-:LSH^p xreg9 = xreg0 << shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { xreg9 = xreg0 << shift; build p;}
+:LSH^p xreg9 = xreg0 << shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { xreg9 = xreg0 << shift; setNZ(xreg9); Vflag = 0; build p;}
 :LSH^p xreg9 = xreg0 >> shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;]  { xreg9 = xreg0 >> shift; build p;}
 :ROT^p xreg9 = "rot" xreg0 "by" 0       is p & op0410=0x68 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & dimm603=0 & xreg9 & xreg0 { xreg9 = xreg0; build p;}
 :ROT^p xreg9 = "rot" xreg0 "by" dimm603 is p & op0410=0x68 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & dimm603   & xreg9 & xreg0 { local t:4 = rot_bf(xreg0, dimm603:4); xreg9 = t; build p; }
@@ -2157,10 +2277,10 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 LC: LC0 is LC0 & c04=0 { export LC0; }
 LC: LC1 is LC1 & c04=1 { export LC1; }
 
-LCm: LC              is rop0506=0 & LC ; li15=0 & lpreg=0 { }
-LCm: LC = lpreg      is rop0506=1 & LC ; li15=0 & lpreg   { LC = lpreg; }
+LCm: LC              is rop0506=0 & LC ; li15=0 & lop=0 & lpreg=0 { }
+LCm: LC = lpreg      is rop0506=1 & LC ; li15=0 & lop=0 & lpreg   { LC = lpreg; }
 # rop=2 is a separate BF+ form with an immediate loop count; see "LSETUP immediate count" below.
-LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=0 & lpreg   { LC = lpreg >> 1; }
+LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=0 & lop=0 & lpreg   { LC = lpreg >> 1; }
 
 # BF+ li15=1 LSETUP forms (alternate loop-end-offset encoding mode). All four li15=0 rows above
 # require li15=0, so any LSETUP with bit15 of iw1 set was a hard decoder gap (halt_baddata in the
@@ -2177,6 +2297,7 @@ LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=1 & lpreg { LC = lpreg >> 1; }
     lstart = inst_start + soffs*2;
     lend = inst_start + eoffs*2;
     loop0active = 1; globalset(lend, loop0active);
+    loop0z = 0; globalset(lend, loop0z);
 ] {
     LT0 = lstart;
     LB0 = lend;
@@ -2187,6 +2308,7 @@ LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=1 & lpreg { LC = lpreg >> 1; }
     lstart = inst_start + soffs*2;
     lend = inst_start + eoffs*2;
     loop1active = 1; globalset(lend, loop1active);
+    loop1z = 0; globalset(lend, loop1z);
 ] {
     LT1 = lstart;
     LB1 = lend;
@@ -2194,6 +2316,57 @@ LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=1 & lpreg { LC = lpreg >> 1; }
 }
 
 @ifdef BLACKFIN_PLUS
+# LSETUPZ / LSETUPLEZ (BF+, PRM Figure 8-110: LOP=01 / 10 with ROP=01 or 11; "Rev 2.0").
+# No start offset: the loop starts at the next instruction. Z skips the whole loop when the
+# count is 0; LEZ when it is <= 0 (signed). A skipped loop jumps to its last instruction with
+# LC = 0; that instruction (marked loop0z/loop1z) then does nothing, so execution resumes after it.
+LZcnt: lpreg        is rop0506=1 ; lpreg { export lpreg; }
+LZcnt: lpreg >> 1   is rop0506=3 ; lpreg { local t:4 = lpreg >> 1; export t; }
+lzend: lz is op9=0x1c1 ; eoffs [ lz = inst_start + eoffs*2; ] { export *[ram]:4 lz; }
+
+:LSETUPZ (lend) LC = LZcnt is (op9=0x1c1 & c04=0 & LC ; li15=0 & lop=1 & eoffs) & LZcnt & lzend
+[
+    lend = inst_start + eoffs*2;
+    loop0active = 1; globalset(lend, loop0active);
+    loop0z = 1; globalset(lend, loop0z);
+] {
+    LT0 = inst_next; LB0 = lend; LC0 = LZcnt;
+    if (LC0 != 0) goto inst_next;
+    goto lzend;
+}
+:LSETUPZ (lend) LC = LZcnt is (op9=0x1c1 & c04=1 & LC ; li15=0 & lop=1 & eoffs) & LZcnt & lzend
+[
+    lend = inst_start + eoffs*2;
+    loop1active = 1; globalset(lend, loop1active);
+    loop1z = 1; globalset(lend, loop1z);
+] {
+    LT1 = inst_next; LB1 = lend; LC1 = LZcnt;
+    if (LC1 != 0) goto inst_next;
+    goto lzend;
+}
+:LSETUPLEZ (lend) LC = LZcnt is (op9=0x1c1 & c04=0 & LC ; li15=0 & lop=2 & eoffs) & LZcnt & lzend
+[
+    lend = inst_start + eoffs*2;
+    loop0active = 1; globalset(lend, loop0active);
+    loop0z = 1; globalset(lend, loop0z);
+] {
+    LT0 = inst_next; LB0 = lend; LC0 = LZcnt;
+    if (LC0 s> 0) goto inst_next;
+    LC0 = 0;
+    goto lzend;
+}
+:LSETUPLEZ (lend) LC = LZcnt is (op9=0x1c1 & c04=1 & LC ; li15=0 & lop=2 & eoffs) & LZcnt & lzend
+[
+    lend = inst_start + eoffs*2;
+    loop1active = 1; globalset(lend, loop1active);
+    loop1z = 1; globalset(lend, loop1z);
+] {
+    LT1 = inst_next; LB1 = lend; LC1 = LZcnt;
+    if (LC1 s> 0) goto inst_next;
+    LC1 = 0;
+    goto lzend;
+}
+
 # LSETUP immediate count (BF+, PRM rev 1.0 Figure 8-110, LOP=--, ROP=10, "Rev 2.0"):
 #   lsetup (end) LC = uimm10
 # No start offset: the loop starts at the next instruction. The 10-bit count is
@@ -2207,6 +2380,7 @@ LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=1 & lpreg { LC = lpreg >> 1; }
     lcount = (soffs << 6) | limm6;
     lend = inst_start + eoffs*2;
     loop0active = 1; globalset(lend, loop0active);
+    loop0z = 0; globalset(lend, loop0z);
 ] {
     LT0 = inst_next;
     LB0 = lend;
@@ -2218,6 +2392,7 @@ LCm: LC = lpreg >> 1 is rop0506=3 & LC ; li15=1 & lpreg { LC = lpreg >> 1; }
     lcount = (soffs << 6) | limm6;
     lend = inst_start + eoffs*2;
     loop1active = 1; globalset(lend, loop1active);
+    loop1z = 0; globalset(lend, loop1z);
 ] {
     LT1 = inst_next;
     LB1 = lend;

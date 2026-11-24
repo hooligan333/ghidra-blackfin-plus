@@ -43,6 +43,11 @@
                 <register name="P5"/>
                 <register name="SP"/>
                 <register name="FP"/>
+                <!-- The C run-time model requires L0-L3 = 0 at call boundaries (circular addressing off) -->
+                <register name="L0"/>
+                <register name="L1"/>
+                <register name="L2"/>
+                <register name="L3"/>
             </unaffected>
         </prototype>
     </default_proto>
