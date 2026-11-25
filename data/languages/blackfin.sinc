@@ -563,6 +563,18 @@ macro lshiftv(res, val, cnt) {
     res = (lft * zext(neg == 0)) + (rgt * zext(neg));
 }
 
+# Rotate through CC (ROT with a 32-bit operand): the 33 bits CC:val are turned cnt places, to the left
+# for cnt > 0 and to the right for cnt < 0, so each bit turned out of the register passes through CC and the old CC
+# enters at the other end. cnt signed 8-byte, -32..31; 0 changes nothing, CC included.
+macro rot32(res, val, cnt) {
+    local v:8 = (zext(CCflag) << 32) | zext(val);
+    local k:8 = ((cnt s% 33:8) + 33:8) % 33:8;
+    local r:8 = ((v << k) | (v >> (33:8 - k))) & 0x1ffffffff:8;
+    local c:8 = (r >> 32) & 1:8;
+    res = r:4;
+    CCflag = c:1;
+}
+
 define pcodeop idle;
 define pcodeop csync;
 define pcodeop ssync;
@@ -581,8 +593,8 @@ define pcodeop bfin_abort;
 # without asserting incorrect step math.
 define pcodeop divq;
 define pcodeop divs;
-# Blackfin ROT rotates through the CC bit (sim rot32/rot40). Modeled as a named
-# pcodeop to avoid truncation without asserting incorrect rotate-through-carry math.
+# Blackfin ROT rotates through the CC bit (sim rot32/rot40). The 32-bit forms are modeled exactly (macro
+# rot32 above). The two accumulator forms (A0, A1: 40 bits and CC) are still a named pcodeop.
 define pcodeop rot_bf;
 
 # Specialized SIMD/DSP ops modeled as named pcodeops (decompile-complete: no halt,
@@ -2075,7 +2087,7 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 :ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l       is p & op0410=0x60 & sopc0003=2 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; ashiftv(r, xreg0, sext(xreg3_l)); xreg9 = r:4; build p; }
 :ASH^p xreg9 = "ashift" xreg0 "by" xreg3_l "(s)" is p & op0410=0x60 & sopc0003=2 ; xsop1415=1 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; ashiftv(r, xreg0, sext(xreg3_l)); sat_s32(r,r); xreg9 = r:4; build p; }
 :LSH^p xreg9 = "lshift" xreg0 "by" xreg3_l       is p & op0410=0x60 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local r:8; lshiftv(r, xreg0, sext(xreg3_l)); xreg9 = r:4; build p; }
-:ROT^p xreg9 = "rot" xreg0 "by" xreg3_l          is p & op0410=0x60 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local c:4 = sext(xreg3_l); local t:4 = rot_bf(xreg0, c); xreg9 = t; build p; }
+:ROT^p xreg9 = "rot" xreg0 "by" xreg3_l          is p & op0410=0x60 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & xreg6=0 & xreg3_l & xreg9 & xreg0 { local c:8 = sext(xreg3_l); local t:4; rot32(t, xreg0, c); xreg9 = t; build p; }
 
 :ASH^p A0 = "ashift" "A0" "by" xreg3_l is p & op0410=0x60 & sopc0003=3 ; xsop1415=0 & xhls1213=0 & xreg6=0 & xreg3_l & A0 { local a:8; accext(a,A0); local r:8; ashiftv(r, a, sext(xreg3_l)); accset(A0,r); build p; }
 :ASH^p A1 = "ashift" "A1" "by" xreg3_l is p & op0410=0x60 & sopc0003=3 ; xsop1415=0 & xhls1213=1 & xreg6=0 & xreg3_l & A1 { local a:8; accext(a,A1); local r:8; ashiftv(r, a, sext(xreg3_l)); accset(A1,r); build p; }
@@ -2189,7 +2201,7 @@ SHRS: xreg0_h is xh12=1 & xreg0_h { export xreg0_h; }
 :LSH^p xreg9 = xreg0 << shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=0 & dimm603 & xreg9 & xreg0 [shift = dimm603+0;] { xreg9 = xreg0 << shift; setNZ(xreg9); Vflag = 0; build p;}
 :LSH^p xreg9 = xreg0 >> shift        is p & op0410=0x68 & sopc0003=2 ; xsop1415=2 & xhls1213=0 & sign08=1 & dimm603 & xreg9 & xreg0 [shift = -dimm603;]  { xreg9 = xreg0 >> shift; build p;}
 :ROT^p xreg9 = "rot" xreg0 "by" 0       is p & op0410=0x68 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & dimm603=0 & xreg9 & xreg0 { xreg9 = xreg0; build p;}
-:ROT^p xreg9 = "rot" xreg0 "by" dimm603 is p & op0410=0x68 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & dimm603   & xreg9 & xreg0 { local t:4 = rot_bf(xreg0, dimm603:4); xreg9 = t; build p; }
+:ROT^p xreg9 = "rot" xreg0 "by" dimm603 is p & op0410=0x68 & sopc0003=2 ; xsop1415=3 & xhls1213=0 & dimm603   & xreg9 & xreg0 { local c4:4 = dimm603; local c:8 = sext(c4); local t:4; rot32(t, xreg0, c); xreg9 = t; build p; }
 
 :ASH^p A0 = "A0" >>> shift is p & op0410=0x68 & sopc0003=3 ; xsop1415=0 & xhls1213=0 & sign08=1 & dimm603 & A0 [shift = -dimm603;] { local a:8; accext(a,A0); accset(A0, a s>> shift); build p; }
 :ASH^p A1 = "A1" >>> shift is p & op0410=0x68 & sopc0003=3 ; xsop1415=0 & xhls1213=1 & sign08=1 & dimm603 & A1 [shift = -dimm603;] { local a:8; accext(a,A1); accset(A1, a s>> shift); build p; }
